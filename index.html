@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Outil de Mind Mapping</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar" aria-label="Actions principales">
+      <h1>MindMap</h1>
+      <div class="actions" role="toolbar" aria-label="Actions de la carte">
+        <button id="undo-btn" title="Annuler (Ctrl/Cmd+Z)">↶ Annuler</button>
+        <button id="redo-btn" title="Rétablir (Ctrl/Cmd+Shift+Z)">↷ Rétablir</button>
+        <button id="add-root-btn" class="cta" title="Ajouter un nœud racine (N)">✚ Racine</button>
+        <button id="add-child-btn" class="cta" title="Ajouter un enfant (Tab)">⤷ Enfant</button>
+        <button id="link-mode-btn" title="Créer des liens libres entre les nœuds (L)">⛓ Lien : Non</button>
+        <button id="delete-btn" title="Supprimer le nœud ou lien sélectionné (Suppr)">🗑 Supprimer</button>
+        <button id="clear-btn" title="Vider la carte">⌫ Vider</button>
+      </div>
+    </header>
+
+    <main>
+      <aside class="panel">
+        <details class="groupe" open>
+          <summary>Style du nœud</summary>
+          <label>
+            Titre du nœud
+            <input id="node-title" type="text" placeholder="Sélectionnez un nœud" />
+          </label>
+          <label>
+            Couleur du texte
+            <input id="node-text-color" type="color" value="#1f2230" />
+          </label>
+          <label>
+            Couleur de fond
+            <input id="node-color" type="color" value="#ffd166" />
+          </label>
+          <label>
+            Couleur du contour
+            <input id="node-border-color" type="color" value="#5c647f" />
+          </label>
+          <label>
+            Épaisseur du contour
+            <input id="node-border-width" type="range" min="0" max="8" step="1" value="2" />
+          </label>
+          <label>
+            Rayon des coins
+            <input id="node-radius" type="range" min="0" max="28" step="1" value="14" />
+          </label>
+          <label>
+            Type de lien
+            <select id="edge-type">
+              <option value="free">Lien libre</option>
+              <option value="tree">Lien arborescent</option>
+            </select>
+          </label>
+          <button id="delete-edge-btn">Supprimer le lien sélectionné</button>
+        </details>
+
+        <details class="groupe">
+          <summary>Disposition</summary>
+          <div class="grid-3">
+            <button id="layout-horizontal-btn">Horizontale</button>
+            <button id="layout-vertical-btn">Verticale</button>
+            <button id="layout-radial-btn">Radiale</button>
+          </div>
+        </details>
+
+        <details class="groupe">
+          <summary>Données</summary>
+          <button id="save-btn" class="cta">Enregistrer</button>
+          <button id="load-btn">Charger</button>
+          <button id="export-json-btn">Exporter JSON</button>
+          <label class="import-label">
+            Importer JSON
+            <input id="import-json-input" type="file" accept="application/json" />
+          </label>
+        </details>
+
+        <details class="groupe">
+          <summary>Instantanés</summary>
+          <div class="grid-2">
+            <button id="refresh-snapshots-btn">Actualiser</button>
+            <button id="clear-snapshots-btn">Tout effacer</button>
+          </div>
+          <div id="snapshots-list" class="snapshots-list"></div>
+        </details>
+
+        <details class="groupe">
+          <summary>Export</summary>
+          <label>
+            Zone
+            <select id="export-region">
+              <option value="all">Carte entière</option>
+              <option value="visible">Vue visible</option>
+              <option value="subtree">Sous-arbre sélectionné</option>
+            </select>
+          </label>
+          <label>
+            Échelle
+            <select id="export-scale">
+              <option value="1">1x</option>
+              <option value="2" selected>2x</option>
+              <option value="3">3x</option>
+            </select>
+          </label>
+          <label>
+            DPI
+            <input id="export-dpi" type="number" min="72" max="600" step="1" value="144" />
+          </label>
+          <label class="checkbox">
+            <input id="export-transparent" type="checkbox" /> Fond transparent
+          </label>
+          <div class="grid-2">
+            <button id="export-svg-btn">SVG</button>
+            <button id="export-png-btn" class="cta">PNG</button>
+          </div>
+        </details>
+
+        <p id="autosave-status" class="subtle">Sauvegarde auto : en attente</p>
+        <p id="status" class="subtle"></p>
+      </aside>
+
+      <section id="canvas" class="canvas" aria-label="Zone de mind map">
+        <div id="stage" class="stage">
+          <div id="node-quick-actions" class="node-quick-actions" hidden>
+            <button id="qa-add-child" title="Ajouter un enfant">+ Enfant</button>
+            <button id="qa-link" title="Créer un lien">Lier</button>
+            <button id="qa-rename" title="Renommer">Renommer</button>
+            <button id="qa-delete" title="Supprimer">Suppr.</button>
+          </div>
+          <svg id="edges" class="edges"></svg>
+          <div id="nodes" class="nodes"></div>
+        </div>
+      </section>
+    </main>
+
+    <template id="node-template">
+      <div class="node" tabindex="0">
+        <span class="node-title"></span>
+      </div>
+    </template>
+
+    <script src="core.js"></script>
+    <script src="script.js"></script>
+  </body>
+</html>
