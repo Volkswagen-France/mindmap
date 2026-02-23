@@ -3,135 +3,222 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Outil de Mind Mapping</title>
+    <title>Atelier de cartes</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <header class="topbar" aria-label="Actions principales">
-      <h1>MindMap</h1>
-      <div class="actions" role="toolbar" aria-label="Actions de la carte">
-        <button id="undo-btn" title="Annuler (Ctrl/Cmd+Z)">↶ Annuler</button>
-        <button id="redo-btn" title="Rétablir (Ctrl/Cmd+Shift+Z)">↷ Rétablir</button>
-        <button id="add-root-btn" class="cta" title="Ajouter un nœud racine (N)">✚ Racine</button>
-        <button id="add-child-btn" class="cta" title="Ajouter un enfant (Tab)">⤷ Enfant</button>
-        <button id="link-mode-btn" title="Créer des liens libres entre les nœuds (L)">⛓ Lien : Non</button>
-        <button id="delete-btn" title="Supprimer le nœud ou lien sélectionné (Suppr)">🗑 Supprimer</button>
-        <button id="clear-btn" title="Vider la carte">⌫ Vider</button>
-      </div>
-    </header>
+    <header class="topbar" aria-label="Barre de contrôle sticky">
+      <div class="toolbar-row">
+        <div class="brand-wrap">
+          <h1>Atelier de cartes</h1>
+          <p>Vue expert</p>
+        </div>
 
-    <main>
-      <aside class="panel">
-        <details class="groupe" open>
-          <summary>Style du nœud</summary>
-          <label>
-            Titre du nœud
-            <input id="node-title" type="text" placeholder="Sélectionnez un nœud" />
-          </label>
-          <label>
-            Couleur du texte
-            <input id="node-text-color" type="color" value="#1f2230" />
-          </label>
-          <label>
-            Couleur de fond
-            <input id="node-color" type="color" value="#ffd166" />
-          </label>
-          <label>
-            Couleur du contour
-            <input id="node-border-color" type="color" value="#5c647f" />
-          </label>
-          <label>
-            Épaisseur du contour
-            <input id="node-border-width" type="range" min="0" max="8" step="1" value="2" />
-          </label>
-          <label>
-            Rayon des coins
-            <input id="node-radius" type="range" min="0" max="28" step="1" value="14" />
-          </label>
-          <label>
-            Type de lien
-            <select id="edge-type">
-              <option value="free">Lien libre</option>
-              <option value="tree">Lien arborescent</option>
+        <div class="group actions-main" role="toolbar" aria-label="Actions principales">
+          <button id="undo-btn" class="btn btn-inline" title="Annuler (Ctrl/Cmd+Z)" aria-label="Annuler">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 8H4v5"/><path d="M4 13a8 8 0 1 0 2.3-5.7L4 9"/></svg>
+            <span>Annuler</span>
+          </button>
+          <button id="redo-btn" class="btn btn-inline" title="Rétablir (Ctrl/Cmd+Shift+Z)" aria-label="Rétablir">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 8h5v5"/><path d="M20 13a8 8 0 1 1-2.3-5.7L20 9"/></svg>
+            <span>Rétablir</span>
+          </button>
+          <button id="add-root-btn" class="btn btn-primary btn-inline" title="Ajouter une racine (N)" aria-label="Ajouter une racine">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+            <span>Racine</span>
+          </button>
+          <button id="add-child-btn" class="btn btn-primary btn-inline" title="Ajouter un enfant (Tab)" aria-label="Ajouter un enfant">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6v12M8 12h9"/><path d="m14 8 3 4-3 4"/></svg>
+            <span>Enfant</span>
+          </button>
+          <button id="link-mode-btn" class="btn btn-inline" title="Mode lien (L)" aria-label="Mode lien" aria-pressed="false">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 13.5 13.5 10.5"/><path d="M7.2 14.8 5 17a3 3 0 0 0 4.2 4.2l2.2-2.2"/><path d="M16.8 9.2 19 7a3 3 0 1 0-4.2-4.2l-2.2 2.2"/></svg>
+            <span>Lier</span>
+          </button>
+          <button id="delete-btn" class="btn btn-danger btn-inline" title="Supprimer la sélection (Suppr)" aria-label="Supprimer">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M8 7l1 12h6l1-12"/></svg>
+            <span>Supprimer</span>
+          </button>
+          <button id="clear-btn" class="btn btn-inline" title="Vider la carte" aria-label="Vider la carte">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4l16 16"/><path d="M7 7h12l-2 12H9L7 7z"/></svg>
+            <span>Vider</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="toolbar-row toolbar-row--controls">
+        <div class="group compact">
+          <span class="group-title">Modèles</span>
+          <label>Modèle
+            <select id="template-select">
+              <option value="produit">Feuille de route produit</option>
+              <option value="sprint">Plan de sprint</option>
+              <option value="reunion">Réunion stratégique</option>
+              <option value="parcours">Parcours client</option>
             </select>
           </label>
-          <button id="delete-edge-btn">Supprimer le lien sélectionné</button>
-        </details>
+          <button id="apply-template-btn" class="btn btn-primary btn-inline">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+            <span>Créer</span>
+          </button>
+        </div>
 
-        <details class="groupe">
-          <summary>Disposition</summary>
-          <div class="grid-3">
-            <button id="layout-horizontal-btn">Horizontale</button>
-            <button id="layout-vertical-btn">Verticale</button>
-            <button id="layout-radial-btn">Radiale</button>
-          </div>
-        </details>
+        <div class="group compact">
+          <span class="group-title">Disposition</span>
+          <button id="layout-horizontal-btn" class="btn btn-inline">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h18M3 12h18M3 17h18"/></svg>
+            <span>Horiz.</span>
+          </button>
+          <button id="layout-vertical-btn" class="btn btn-inline">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3v18M12 3v18M17 3v18"/></svg>
+            <span>Vert.</span>
+          </button>
+          <button id="layout-radial-btn" class="btn btn-inline">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12m-2.5 0a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0"/><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8"/></svg>
+            <span>Radiale</span>
+          </button>
+        </div>
 
-        <details class="groupe">
-          <summary>Données</summary>
-          <button id="save-btn" class="cta">Enregistrer</button>
-          <button id="load-btn">Charger</button>
-          <button id="export-json-btn">Exporter JSON</button>
-          <label class="import-label">
-            Importer JSON
+        <div class="group compact">
+          <span class="group-title">Données</span>
+          <button id="save-btn" class="btn btn-primary btn-inline">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h12l2 2v14H5z"/><path d="M8 4v6h8V4"/></svg>
+            <span>Enregistrer</span>
+          </button>
+          <button id="load-btn" class="btn btn-inline">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 21h16"/></svg>
+            <span>Charger</span>
+          </button>
+          <button id="export-json-btn" class="btn btn-inline">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H6a2 2 0 0 0-2 2v2"/><path d="M8 20H6a2 2 0 0 1-2-2v-2"/><path d="M16 4h2a2 2 0 0 1 2 2v2"/><path d="M16 20h2a2 2 0 0 0 2-2v-2"/><path d="M10 9h4M10 15h4"/></svg>
+            <span>JSON</span>
+          </button>
+          <label class="import-inline">Importer
             <input id="import-json-input" type="file" accept="application/json" />
           </label>
-        </details>
+        </div>
 
-        <details class="groupe">
-          <summary>Instantanés</summary>
-          <div class="grid-2">
-            <button id="refresh-snapshots-btn">Actualiser</button>
-            <button id="clear-snapshots-btn">Tout effacer</button>
-          </div>
-          <div id="snapshots-list" class="snapshots-list"></div>
-        </details>
+        <div class="group compact">
+          <span class="group-title">Liens</span>
+          <label>Lien
+            <select id="edge-type">
+              <option value="free">Libre</option>
+              <option value="tree">Arbo.</option>
+            </select>
+          </label>
+          <button id="delete-edge-btn" class="btn btn-inline">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12"/><path d="M18 6 6 18"/></svg>
+            <span>Suppr. lien</span>
+          </button>
+        </div>
 
-        <details class="groupe">
-          <summary>Export</summary>
-          <label>
-            Zone
+        <div class="group compact">
+          <span class="group-title">Export</span>
+          <label>Zone
             <select id="export-region">
               <option value="all">Carte entière</option>
               <option value="visible">Vue visible</option>
-              <option value="subtree">Sous-arbre sélectionné</option>
+              <option value="subtree">Sous-arbre</option>
             </select>
           </label>
-          <label>
-            Échelle
+          <label>Échelle
             <select id="export-scale">
               <option value="1">1x</option>
               <option value="2" selected>2x</option>
               <option value="3">3x</option>
             </select>
           </label>
-          <label>
-            DPI
+          <label>DPI
             <input id="export-dpi" type="number" min="72" max="600" step="1" value="144" />
           </label>
-          <label class="checkbox">
-            <input id="export-transparent" type="checkbox" /> Fond transparent
-          </label>
-          <div class="grid-2">
-            <button id="export-svg-btn">SVG</button>
-            <button id="export-png-btn" class="cta">PNG</button>
-          </div>
-        </details>
+          <label class="check-inline"><input id="export-transparent" type="checkbox" />Transparent</label>
+          <button id="export-svg-btn" class="btn btn-inline">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16V4H4z"/><path d="M8 14c0-2 3-2 3-4s-3-2-3-4"/><path d="M16 10h-3v6h3"/></svg>
+            <span>SVG</span>
+          </button>
+          <button id="export-png-btn" class="btn btn-primary btn-inline">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="m7 15 3-3 3 3 4-4 2 2"/></svg>
+            <span>PNG</span>
+          </button>
+        </div>
 
-        <p id="autosave-status" class="subtle">Sauvegarde auto : en attente</p>
-        <p id="status" class="subtle"></p>
-      </aside>
+        <div class="status-inline">
+          <span id="autosave-status" class="chip">Sauvegarde auto : en attente</span>
+          <span id="status" class="chip chip--muted"></span>
+        </div>
+      </div>
+    </header>
 
+    <main class="workspace">
       <section id="canvas" class="canvas" aria-label="Zone de mind map">
         <div id="stage" class="stage">
           <div id="node-quick-actions" class="node-quick-actions" hidden>
-            <button id="qa-add-child" title="Ajouter un enfant">+ Enfant</button>
-            <button id="qa-link" title="Créer un lien">Lier</button>
-            <button id="qa-rename" title="Renommer">Renommer</button>
-            <button id="qa-delete" title="Supprimer">Suppr.</button>
+            <div class="node-quick-top">
+              <button id="qa-add-child" title="Ajouter un enfant" aria-label="Ajouter un enfant">
+                <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6v12M8 12h9"/><path d="m14 8 3 4-3 4"/></svg>
+                <span>Enfant</span>
+              </button>
+              <button id="qa-link" title="Créer un lien" aria-label="Créer un lien">
+                <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 13.5 13.5 10.5"/><path d="M7.2 14.8 5 17a3 3 0 0 0 4.2 4.2l2.2-2.2"/><path d="M16.8 9.2 19 7a3 3 0 1 0-4.2-4.2l-2.2 2.2"/></svg>
+                <span>Lier</span>
+              </button>
+              <button id="qa-rename" title="Renommer" aria-label="Renommer">
+                <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l10-10-4-4L4 16v4z"/><path d="m12 6 4 4"/></svg>
+                <span>Renommer</span>
+              </button>
+              <button id="qa-delete" title="Supprimer" aria-label="Supprimer">
+                <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M8 7l1 12h6l1-12"/></svg>
+                <span>Suppr.</span>
+              </button>
+            </div>
+            <div class="node-quick-style">
+              <div class="node-quick-presets" aria-label="Styles rapides">
+                <button type="button" class="preset" data-style-preset="ocean" title="Style océan"></button>
+                <button type="button" class="preset" data-style-preset="menthe" title="Style menthe"></button>
+                <button type="button" class="preset" data-style-preset="abricot" title="Style abricot"></button>
+                <button type="button" class="preset" data-style-preset="lilas" title="Style lilas"></button>
+                <button type="button" class="preset" data-style-preset="ardoise" title="Style ardoise"></button>
+              </div>
+              <label>Titre
+                <input id="node-title" type="text" placeholder="Nœud" />
+              </label>
+              <div class="node-quick-colors">
+                <label>Texte
+                  <input id="node-text-color" type="color" value="#1f2230" />
+                </label>
+                <label>Fond
+                  <input id="node-color" type="color" value="#ffd166" />
+                </label>
+                <label>Contour
+                  <input id="node-border-color" type="color" value="#5c647f" />
+                </label>
+              </div>
+              <div class="node-quick-sliders">
+                <label>Épais.
+                  <input id="node-border-width" type="range" min="0" max="8" step="1" value="2" />
+                </label>
+                <label>Rayon
+                  <input id="node-radius" type="range" min="0" max="28" step="1" value="14" />
+                </label>
+              </div>
+            </div>
           </div>
           <svg id="edges" class="edges"></svg>
           <div id="nodes" class="nodes"></div>
+        </div>
+        <div id="empty-state" class="empty-state" hidden>
+          <h2>Carte vide</h2>
+          <p>Crée un point de départ, puis enrichis par clic sur chaque nœud.</p>
+          <div class="empty-actions">
+            <button id="empty-create-btn" class="btn btn-primary btn-inline">
+              <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+              <span>Créer une racine</span>
+            </button>
+            <button id="empty-template-btn" class="btn btn-inline">
+              <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z"/></svg>
+              <span>Appliquer un modèle</span>
+            </button>
+          </div>
         </div>
       </section>
     </main>

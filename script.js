@@ -5,6 +5,7 @@ const SNAPSHOT_KEY = "mindmap-snapshots-v2";
 const AUTOSAVE_INTERVAL_MS = 12000;
 const SNAPSHOT_INTERVAL_MS = 60000;
 const SNAPSHOT_LIMIT = 25;
+const SNAP_THRESHOLD = 18;
 
 const state = {
   graph: {
@@ -56,6 +57,8 @@ const els = {
   radiusInput: document.getElementById("node-radius"),
   edgeTypeSelect: document.getElementById("edge-type"),
   deleteEdgeBtn: document.getElementById("delete-edge-btn"),
+  templateSelect: document.getElementById("template-select"),
+  applyTemplateBtn: document.getElementById("apply-template-btn"),
   layoutHorizontalBtn: document.getElementById("layout-horizontal-btn"),
   layoutVerticalBtn: document.getElementById("layout-vertical-btn"),
   layoutRadialBtn: document.getElementById("layout-radial-btn"),
@@ -77,6 +80,9 @@ const els = {
   qaLinkBtn: document.getElementById("qa-link"),
   qaRenameBtn: document.getElementById("qa-rename"),
   qaDeleteBtn: document.getElementById("qa-delete"),
+  emptyState: document.getElementById("empty-state"),
+  emptyCreateBtn: document.getElementById("empty-create-btn"),
+  emptyTemplateBtn: document.getElementById("empty-template-btn"),
   autosaveStatus: document.getElementById("autosave-status"),
   status: document.getElementById("status"),
 };
@@ -133,6 +139,51 @@ function getEdge(id) {
   return state.graph.edges.find((edge) => edge.id === id);
 }
 
+function magnetiserPositionNoeud(nodeId, x, y) {
+  const node = getNode(nodeId);
+  if (!node) return { x, y };
+
+  let sx = x;
+  let sy = y;
+
+  const parent = node.parentId ? getNode(node.parentId) : null;
+  if (parent) {
+    const targetX = parent.x + 260;
+    if (Math.abs(sx - targetX) <= SNAP_THRESHOLD) {
+      sx = targetX;
+    }
+    if (Math.abs(sy - parent.y) <= SNAP_THRESHOLD) {
+      sy = parent.y;
+    }
+
+    const fratrie = state.graph.nodes.filter((n) => n.parentId === parent.id && n.id !== node.id);
+    for (const sibling of fratrie) {
+      if (Math.abs(sy - sibling.y) <= SNAP_THRESHOLD) {
+        sy = sibling.y;
+        break;
+      }
+    }
+  }
+
+  for (const other of state.graph.nodes) {
+    if (other.id === node.id) continue;
+    if (Math.abs(sx - other.x) <= SNAP_THRESHOLD) {
+      sx = other.x;
+    }
+    if (Math.abs(sy - other.y) <= SNAP_THRESHOLD) {
+      sy = other.y;
+    }
+  }
+
+  const grille = 30;
+  const gx = Math.round(sx / grille) * grille;
+  const gy = Math.round(sy / grille) * grille;
+  if (Math.abs(sx - gx) <= 10) sx = gx;
+  if (Math.abs(sy - gy) <= 10) sy = gy;
+
+  return { x: sx, y: sy };
+}
+
 function appliquerStyleParDefaut(node) {
   if (!node) return;
   if (typeof node.textColor !== "string") node.textColor = "#1f2230";
@@ -147,6 +198,78 @@ function computeMapSize() {
     width: Math.max(1600, Math.ceil(bounds.x + bounds.width + 900)),
     height: Math.max(1200, Math.ceil(bounds.y + bounds.height + 900)),
   };
+}
+
+function genererTemplate(type) {
+  const palette = ["#e9f2ff", "#eafaf0", "#fff4e8", "#f3efff", "#eaf7ff", "#fff0f5"];
+  let counter = 1;
+  const nodes = [];
+  const edges = [];
+
+  function makeNode(title, parentId, depth, index) {
+    const id = String(counter++);
+    const color = palette[(depth + index) % palette.length];
+    nodes.push({
+      id,
+      x: 0,
+      y: 0,
+      title,
+      color,
+      textColor: "#10223f",
+      borderColor: "#6f86b2",
+      borderWidth: 2,
+      radius: 14,
+      parentId: parentId || null,
+    });
+    if (parentId) {
+      edges.push({ id: `tree-${parentId}-${id}`, source: parentId, target: id, type: "tree" });
+    }
+    return id;
+  }
+
+  function branch(parentId, depth, titles) {
+    const ids = [];
+    for (let i = 0; i < titles.length; i += 1) {
+      ids.push(makeNode(titles[i], parentId, depth, i));
+    }
+    return ids;
+  }
+
+  if (type === "produit") {
+    const root = makeNode("Feuille de route produit", null, 0, 0);
+    const pillars = branch(root, 1, ["Vision", "Utilisateur", "Métier", "Technique"]);
+    branch(pillars[0], 2, ["Objectifs 12 mois", "Positionnement", "Indicateurs stratégiques"]);
+    branch(pillars[1], 2, ["Profils types", "Points de friction", "Besoins à accomplir"]);
+    branch(pillars[2], 2, ["Monétisation", "Stratégie marché", "Priorités marché"]);
+    branch(pillars[3], 2, ["Architecture", "Dette technique", "Risques"]);
+  } else if (type === "sprint") {
+    const root = makeNode("Plan de sprint", null, 0, 0);
+    const blocks = branch(root, 1, ["Objectif sprint", "Backlog", "Équipe", "Rituels", "Risques"]);
+    branch(blocks[0], 2, ["Métrique de succès", "Périmètre", "Hypothèses"]);
+    const backlog = branch(blocks[1], 2, ["Tâche A", "Tâche B", "Tâche C", "Tâche D"]);
+    branch(backlog[0], 3, ["Critères d'acceptation", "Estimation"]);
+    branch(blocks[2], 2, ["Capacité", "Compétences", "Disponibilités"]);
+    branch(blocks[3], 2, ["Quotidienne", "Planification", "Revue", "Rétro"]);
+    branch(blocks[4], 2, ["Blocages externes", "Dépendances", "Plan de secours"]);
+  } else if (type === "reunion") {
+    const root = makeNode("Réunion stratégique", null, 0, 0);
+    const axes = branch(root, 1, ["Contexte", "Décisions", "Actions", "Suivi"]);
+    branch(axes[0], 2, ["Données clés", "Feedback terrain", "Contraintes"]);
+    branch(axes[1], 2, ["Option A", "Option B", "Arbitrage"]);
+    branch(axes[2], 2, ["Responsables", "Échéances", "Dépendances"]);
+    branch(axes[3], 2, ["Prochaine revue", "Métriques", "Risques ouverts"]);
+  } else {
+    const root = makeNode("Parcours client", null, 0, 0);
+    const stages = branch(root, 1, ["Découverte", "Considération", "Décision", "Intégration", "Fidélisation"]);
+    branch(stages[0], 2, ["Canaux", "Messages", "Audience"]);
+    branch(stages[1], 2, ["Freins", "Preuves", "Comparaison"]);
+    branch(stages[2], 2, ["Offre", "Tarification", "Appel à l'action"]);
+    branch(stages[3], 2, ["Activation", "Moment déclic", "Support"]);
+    branch(stages[4], 2, ["Engagement", "Indice de recommandation", "Montée en gamme"]);
+  }
+
+  const graph = { nodes, edges, nextId: counter };
+  return core.layoutGraph(graph, "horizontal");
 }
 
 function commit(mutator, label) {
@@ -247,6 +370,12 @@ function createNode({
   }, "Nœud créé");
 }
 
+function createRootAtCenter() {
+  const rect = els.canvas.getBoundingClientRect();
+  const center = toWorld(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  createNode({ x: center.x, y: center.y, title: `Racine ${state.graph.nodes.length + 1}` });
+}
+
 function addChildToSelected() {
   if (!state.selectedNodeId) return;
   const parent = getNode(state.selectedNodeId);
@@ -288,6 +417,28 @@ function toggleLinkMode() {
   state.linkingFrom = null;
   setStatus(`Mode lien ${state.linkMode ? "activé" : "désactivé"}`, false);
   requestRender();
+}
+
+function applyNodeStylePreset(preset) {
+  if (!state.selectedNodeId) return;
+  const presets = {
+    ocean: { color: "#dff0ff", textColor: "#0d3b75", borderColor: "#2f7bd4", borderWidth: 2, radius: 14 },
+    menthe: { color: "#e5fbef", textColor: "#13462d", borderColor: "#2ca469", borderWidth: 2, radius: 16 },
+    abricot: { color: "#fff2e6", textColor: "#6b3510", borderColor: "#f08d3c", borderWidth: 2, radius: 14 },
+    lilas: { color: "#f3edff", textColor: "#3c2b73", borderColor: "#7e6bff", borderWidth: 2, radius: 18 },
+    ardoise: { color: "#e8ecf4", textColor: "#1f293b", borderColor: "#66758f", borderWidth: 2, radius: 12 },
+  };
+  const style = presets[preset];
+  if (!style) return;
+  commit(() => {
+    const node = getNode(state.selectedNodeId);
+    if (!node) return;
+    node.color = style.color;
+    node.textColor = style.textColor;
+    node.borderColor = style.borderColor;
+    node.borderWidth = style.borderWidth;
+    node.radius = style.radius;
+  }, "Style du nœud appliqué");
 }
 
 function onNodeClick(nodeId) {
@@ -333,6 +484,16 @@ function runLayout(mode) {
       centerOnNode(state.selectedNodeId);
     }
   }, `Disposition ${libelle} appliquée`);
+}
+
+function appliquerTemplateSelectionne() {
+  const type = els.templateSelect.value || "produit";
+  const graph = genererTemplate(type);
+  history.clear();
+  const ok = applyGraph(graph, "Modèle appliqué");
+  if (!ok) return;
+  state.selectedNodeId = state.graph.nodes[0] ? state.graph.nodes[0].id : null;
+  centerOnNode(state.selectedNodeId);
 }
 
 function undo() {
@@ -391,6 +552,7 @@ function saveSnapshots(snapshots) {
 }
 
 function renderSnapshotList() {
+  if (!els.snapshotsList) return;
   const snapshots = getSnapshots();
   if (snapshots.length === 0) {
     els.snapshotsList.innerHTML = `<p class="subtle">Aucun instantané.</p>`;
@@ -808,6 +970,7 @@ function renderEdges() {
 function renderControls() {
   const nodeSelected = Boolean(state.selectedNodeId);
   const edgeSelected = Boolean(state.selectedEdgeId);
+  const hasNodes = state.graph.nodes.length > 0;
   const snapshot = history.snapshot();
 
   if (!nodeSelected) {
@@ -819,7 +982,9 @@ function renderControls() {
     els.radiusInput.value = "14";
   }
 
-  els.linkModeBtn.textContent = `⛓ Lien : ${state.linkMode ? "Oui" : "Non"}`;
+  els.linkModeBtn.setAttribute("aria-pressed", state.linkMode ? "true" : "false");
+  els.linkModeBtn.classList.toggle("is-active", state.linkMode);
+  els.linkModeBtn.title = state.linkMode ? "Mode lien activé" : "Mode lien désactivé";
   els.undoBtn.disabled = !history.canUndo();
   els.redoBtn.disabled = !history.canRedo();
   els.addChildBtn.disabled = !nodeSelected;
@@ -840,6 +1005,9 @@ function renderControls() {
 
   els.undoBtn.title = `Annuler (${snapshot.undo})`;
   els.redoBtn.title = `Rétablir (${snapshot.redo})`;
+  if (els.emptyState) {
+    els.emptyState.hidden = hasNodes;
+  }
 }
 
 function renderQuickActions() {
@@ -848,10 +1016,16 @@ function renderQuickActions() {
   els.quickActions.hidden = !show;
   if (!show) return;
 
-  const x = node.x + core.NODE_WIDTH / 2 - 108;
-  const y = node.y - 40;
+  const mapSize = computeMapSize();
+  const menuWidth = 290;
+  let x = node.x + core.NODE_WIDTH + 14;
+  let y = node.y - 6;
+  if (x + menuWidth > mapSize.width - 10) {
+    x = node.x - menuWidth - 14;
+  }
+  if (y < 10) y = 10;
   els.quickActions.style.left = `${Math.max(10, x)}px`;
-  els.quickActions.style.top = `${Math.max(10, y)}px`;
+  els.quickActions.style.top = `${y}px`;
 }
 
 function renderViewport() {
@@ -894,8 +1068,11 @@ function onNodePointerMove(event) {
   if (!node) return;
 
   const world = toWorld(event.clientX, event.clientY);
-  node.x = Math.max(20, world.x - state.dragOffset.x);
-  node.y = Math.max(20, world.y - state.dragOffset.y);
+  const rawX = Math.max(20, world.x - state.dragOffset.x);
+  const rawY = Math.max(20, world.y - state.dragOffset.y);
+  const snapped = magnetiserPositionNoeud(nodeId, rawX, rawY);
+  node.x = snapped.x;
+  node.y = snapped.y;
   requestRender();
 }
 
@@ -1044,8 +1221,7 @@ function onKeyDown(event) {
 
   if (event.key.toLowerCase() === "n") {
     event.preventDefault();
-    const center = toWorld(window.innerWidth / 2, window.innerHeight / 2);
-    createNode({ x: center.x, y: center.y, title: `Racine ${state.graph.nodes.length + 1}` });
+    createRootAtCenter();
     return;
   }
 
@@ -1163,9 +1339,7 @@ els.undoBtn.addEventListener("click", undo);
 els.redoBtn.addEventListener("click", redo);
 
 els.addRootBtn.addEventListener("click", () => {
-  const rect = els.canvas.getBoundingClientRect();
-  const center = toWorld(rect.left + rect.width / 2, rect.top + rect.height / 2);
-  createNode({ x: center.x, y: center.y, title: `Racine ${state.graph.nodes.length + 1}` });
+  createRootAtCenter();
 });
 
 els.addChildBtn.addEventListener("click", () => {
@@ -1243,6 +1417,7 @@ els.edgeTypeSelect.addEventListener("change", (event) => {
 els.layoutHorizontalBtn.addEventListener("click", () => runLayout("horizontal"));
 els.layoutVerticalBtn.addEventListener("click", () => runLayout("vertical"));
 els.layoutRadialBtn.addEventListener("click", () => runLayout("radial"));
+els.applyTemplateBtn.addEventListener("click", appliquerTemplateSelectionne);
 
 els.saveBtn.addEventListener("click", () => {
   saveNow();
@@ -1258,20 +1433,26 @@ els.importJsonInput.addEventListener("change", (event) => {
   event.target.value = "";
 });
 
-els.snapshotsList.addEventListener("click", (event) => {
-  const button = event.target.closest("button[data-action]");
-  if (!button) return;
-  const index = Number(button.dataset.index);
-  if (!Number.isInteger(index)) return;
-  if (button.dataset.action === "restore-snapshot") {
-    restoreSnapshotAt(index);
-  } else if (button.dataset.action === "delete-snapshot") {
-    deleteSnapshotAt(index);
-  }
-});
+if (els.snapshotsList) {
+  els.snapshotsList.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-action]");
+    if (!button) return;
+    const index = Number(button.dataset.index);
+    if (!Number.isInteger(index)) return;
+    if (button.dataset.action === "restore-snapshot") {
+      restoreSnapshotAt(index);
+    } else if (button.dataset.action === "delete-snapshot") {
+      deleteSnapshotAt(index);
+    }
+  });
+}
 
-els.refreshSnapshotsBtn.addEventListener("click", renderSnapshotList);
-els.clearSnapshotsBtn.addEventListener("click", clearAllSnapshots);
+if (els.refreshSnapshotsBtn) {
+  els.refreshSnapshotsBtn.addEventListener("click", renderSnapshotList);
+}
+if (els.clearSnapshotsBtn) {
+  els.clearSnapshotsBtn.addEventListener("click", clearAllSnapshots);
+}
 
 els.exportSvgBtn.addEventListener("click", exportSvg);
 els.exportPngBtn.addEventListener("click", exportPng);
@@ -1297,6 +1478,19 @@ els.qaRenameBtn.addEventListener("click", () => {
 els.qaDeleteBtn.addEventListener("click", () => {
   deleteSelected();
 });
+
+els.quickActions.addEventListener("click", (event) => {
+  const presetButton = event.target.closest("[data-style-preset]");
+  if (!presetButton) return;
+  applyNodeStylePreset(presetButton.dataset.stylePreset);
+});
+
+if (els.emptyCreateBtn) {
+  els.emptyCreateBtn.addEventListener("click", createRootAtCenter);
+}
+if (els.emptyTemplateBtn) {
+  els.emptyTemplateBtn.addEventListener("click", appliquerTemplateSelectionne);
+}
 
 window.setInterval(runAutosave, AUTOSAVE_INTERVAL_MS);
 

@@ -218,71 +218,141 @@
     if (nodes.length === 0) return next;
 
     const nodeIndex = buildNodeIndex(nodes);
-    const roots = nodes.filter((node) => !node.parentId || !nodeIndex.has(node.parentId));
-    const visited = new Set();
-    const layers = [];
-
-    function bfs(root) {
-      const queue = [{ id: root.id, depth: 0 }];
-      while (queue.length) {
-        const current = queue.shift();
-        if (!current || visited.has(current.id)) continue;
-        visited.add(current.id);
-        if (!layers[current.depth]) layers[current.depth] = [];
-        layers[current.depth].push(current.id);
-
-        for (const node of nodes) {
-          if (node.parentId === current.id) {
-            queue.push({ id: node.id, depth: current.depth + 1 });
-          }
-        }
-      }
-    }
-
-    for (const root of roots) bfs(root);
+    const children = new Map();
     for (const node of nodes) {
-      if (!visited.has(node.id)) bfs(node);
+      children.set(node.id, []);
+    }
+    for (const node of nodes) {
+      if (!node.parentId || !nodeIndex.has(node.parentId)) continue;
+      children.get(node.parentId).push(node.id);
     }
 
-    if (mode === "horizontal") {
-      for (let depth = 0; depth < layers.length; depth += 1) {
-        const ids = layers[depth] || [];
-        for (let row = 0; row < ids.length; row += 1) {
-          const node = nodeIndex.get(ids[row]);
-          node.x = 120 + depth * 280;
-          node.y = 100 + row * 110;
+    const roots = nodes
+      .filter((node) => !node.parentId || !nodeIndex.has(node.parentId))
+      .map((node) => node.id);
+    if (roots.length === 0) {
+      roots.push(nodes[0].id);
+    }
+
+    const spanMemo = new Map();
+    const SIBLING_GAP_UNITS = 0.42;
+
+    function subtreeSpan(nodeId) {
+      if (spanMemo.has(nodeId)) return spanMemo.get(nodeId);
+      const kids = children.get(nodeId) || [];
+      if (kids.length === 0) {
+        spanMemo.set(nodeId, 1);
+        return 1;
+      }
+      let total = 0;
+      for (let i = 0; i < kids.length; i += 1) {
+        total += subtreeSpan(kids[i]);
+      }
+      total += SIBLING_GAP_UNITS * Math.max(0, kids.length - 1);
+      const span = Math.max(1, total);
+      spanMemo.set(nodeId, span);
+      return span;
+    }
+
+    if (mode === "horizontal" || mode === "vertical") {
+      const depthGap = mode === "horizontal" ? 300 : 132;
+      const trackGap = mode === "horizontal" ? 114 : 270;
+      const startX = 140;
+      const startY = 110;
+      let cursor = 0;
+
+      function place(nodeId, depth, topUnits) {
+        const kids = children.get(nodeId) || [];
+        const span = subtreeSpan(nodeId);
+        const center = topUnits + span / 2;
+        const node = nodeIndex.get(nodeId);
+
+        if (mode === "horizontal") {
+          node.x = startX + depth * depthGap;
+          node.y = startY + center * trackGap;
+        } else {
+          node.x = startX + center * trackGap;
+          node.y = startY + depth * depthGap;
+        }
+
+        let childTop = topUnits;
+        for (let i = 0; i < kids.length; i += 1) {
+          const childId = kids[i];
+          place(childId, depth + 1, childTop);
+          childTop += subtreeSpan(childId) + SIBLING_GAP_UNITS;
         }
       }
-    } else if (mode === "vertical") {
-      for (let depth = 0; depth < layers.length; depth += 1) {
-        const ids = layers[depth] || [];
-        for (let col = 0; col < ids.length; col += 1) {
-          const node = nodeIndex.get(ids[col]);
-          node.x = 120 + col * 260;
-          node.y = 100 + depth * 120;
+
+      for (let i = 0; i < roots.length; i += 1) {
+        const rootId = roots[i];
+        place(rootId, 0, cursor);
+        cursor += subtreeSpan(rootId) + 1.1;
+      }
+      return next;
+    }
+
+    if (mode === "radial") {
+      const centerX = 920;
+      const centerY = 620;
+      const radiusStep = 230;
+      const sectorPadding = 0.03;
+
+      function placeRadial(nodeId, depth, angleStart, angleEnd) {
+        const node = nodeIndex.get(nodeId);
+        const angle = (angleStart + angleEnd) / 2;
+        const radius = depth * radiusStep;
+        node.x = centerX + Math.cos(angle) * radius - NODE_WIDTH / 2;
+        node.y = centerY + Math.sin(angle) * radius - NODE_HEIGHT / 2;
+
+        const kids = children.get(nodeId) || [];
+        if (kids.length === 0) return;
+
+        let total = 0;
+        for (let i = 0; i < kids.length; i += 1) {
+          total += subtreeSpan(kids[i]);
+        }
+        let cursor = angleStart;
+        const range = angleEnd - angleStart;
+        for (let i = 0; i < kids.length; i += 1) {
+          const childId = kids[i];
+          const weight = subtreeSpan(childId) / Math.max(total, 1);
+          const slice = range * weight;
+          const a0 = cursor + sectorPadding;
+          const a1 = cursor + slice - sectorPadding;
+          placeRadial(childId, depth + 1, Math.min(a0, a1), Math.max(a0, a1));
+          cursor += slice;
         }
       }
-    } else if (mode === "radial") {
-      const centerX = 700;
-      const centerY = 480;
-      for (let depth = 0; depth < layers.length; depth += 1) {
-        const ids = layers[depth] || [];
-        const radius = depth * 210;
-        if (depth === 0) {
-          const node = nodeIndex.get(ids[0]);
-          if (node) {
-            node.x = centerX - NODE_WIDTH / 2;
-            node.y = centerY - NODE_HEIGHT / 2;
-          }
-          continue;
+
+      if (roots.length === 1) {
+        const rootId = roots[0];
+        const root = nodeIndex.get(rootId);
+        root.x = centerX - NODE_WIDTH / 2;
+        root.y = centerY - NODE_HEIGHT / 2;
+        const kids = children.get(rootId) || [];
+        let total = 0;
+        for (let i = 0; i < kids.length; i += 1) total += subtreeSpan(kids[i]);
+        let cursor = -Math.PI;
+        for (let i = 0; i < kids.length; i += 1) {
+          const childId = kids[i];
+          const weight = subtreeSpan(childId) / Math.max(total, 1);
+          const slice = 2 * Math.PI * weight;
+          placeRadial(childId, 1, cursor + sectorPadding, cursor + slice - sectorPadding);
+          cursor += slice;
         }
-        for (let i = 0; i < ids.length; i += 1) {
-          const angle = (2 * Math.PI * i) / Math.max(1, ids.length);
-          const node = nodeIndex.get(ids[i]);
-          node.x = centerX + Math.cos(angle) * radius - NODE_WIDTH / 2;
-          node.y = centerY + Math.sin(angle) * radius - NODE_HEIGHT / 2;
+      } else {
+        let totalRootSpan = 0;
+        for (let i = 0; i < roots.length; i += 1) totalRootSpan += subtreeSpan(roots[i]);
+        let cursor = -Math.PI;
+        for (let i = 0; i < roots.length; i += 1) {
+          const rootId = roots[i];
+          const weight = subtreeSpan(rootId) / Math.max(totalRootSpan, 1);
+          const slice = 2 * Math.PI * weight;
+          placeRadial(rootId, 1, cursor + sectorPadding, cursor + slice - sectorPadding);
+          cursor += slice;
         }
       }
+      return next;
     }
 
     return next;
