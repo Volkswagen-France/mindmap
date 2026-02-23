@@ -9,11 +9,6 @@
   <body>
     <header class="topbar" aria-label="Barre de contrôle sticky">
       <div class="toolbar-row">
-        <div class="brand-wrap">
-          <h1>Atelier de cartes</h1>
-          <p>Vue expert</p>
-        </div>
-
         <div class="group actions-main" role="toolbar" aria-label="Actions principales">
           <button id="undo-btn" class="btn btn-inline" title="Annuler (Ctrl/Cmd+Z)" aria-label="Annuler">
             <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 8H4v5"/><path d="M4 13a8 8 0 1 0 2.3-5.7L4 9"/></svg>
@@ -31,10 +26,6 @@
             <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6v12M8 12h9"/><path d="m14 8 3 4-3 4"/></svg>
             <span>Enfant</span>
           </button>
-          <button id="link-mode-btn" class="btn btn-inline" title="Mode lien (L)" aria-label="Mode lien" aria-pressed="false">
-            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 13.5 13.5 10.5"/><path d="M7.2 14.8 5 17a3 3 0 0 0 4.2 4.2l2.2-2.2"/><path d="M16.8 9.2 19 7a3 3 0 1 0-4.2-4.2l-2.2 2.2"/></svg>
-            <span>Lier</span>
-          </button>
           <button id="delete-btn" class="btn btn-danger btn-inline" title="Supprimer la sélection (Suppr)" aria-label="Supprimer">
             <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M8 7l1 12h6l1-12"/></svg>
             <span>Supprimer</span>
@@ -44,107 +35,13 @@
             <span>Vider</span>
           </button>
         </div>
-      </div>
-
-      <div class="toolbar-row toolbar-row--controls">
-        <div class="group compact">
-          <span class="group-title">Modèles</span>
-          <label>Modèle
-            <select id="template-select">
-              <option value="produit">Feuille de route produit</option>
-              <option value="sprint">Plan de sprint</option>
-              <option value="reunion">Réunion stratégique</option>
-              <option value="parcours">Parcours client</option>
-            </select>
-          </label>
-          <button id="apply-template-btn" class="btn btn-primary btn-inline">
-            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-            <span>Créer</span>
-          </button>
-        </div>
-
-        <div class="group compact">
-          <span class="group-title">Disposition</span>
-          <button id="layout-horizontal-btn" class="btn btn-inline">
-            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h18M3 12h18M3 17h18"/></svg>
-            <span>Horiz.</span>
-          </button>
-          <button id="layout-vertical-btn" class="btn btn-inline">
-            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3v18M12 3v18M17 3v18"/></svg>
-            <span>Vert.</span>
-          </button>
-          <button id="layout-radial-btn" class="btn btn-inline">
-            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12m-2.5 0a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0"/><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8"/></svg>
-            <span>Radiale</span>
-          </button>
-        </div>
-
-        <div class="group compact">
-          <span class="group-title">Données</span>
-          <button id="save-btn" class="btn btn-primary btn-inline">
-            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h12l2 2v14H5z"/><path d="M8 4v6h8V4"/></svg>
-            <span>Enregistrer</span>
-          </button>
-          <button id="load-btn" class="btn btn-inline">
-            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 21h16"/></svg>
-            <span>Charger</span>
-          </button>
-          <button id="export-json-btn" class="btn btn-inline">
-            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H6a2 2 0 0 0-2 2v2"/><path d="M8 20H6a2 2 0 0 1-2-2v-2"/><path d="M16 4h2a2 2 0 0 1 2 2v2"/><path d="M16 20h2a2 2 0 0 0 2-2v-2"/><path d="M10 9h4M10 15h4"/></svg>
-            <span>JSON</span>
-          </button>
-          <label class="import-inline">Importer
-            <input id="import-json-input" type="file" accept="application/json" />
-          </label>
-        </div>
-
-        <div class="group compact">
-          <span class="group-title">Liens</span>
-          <label>Lien
-            <select id="edge-type">
-              <option value="free">Libre</option>
-              <option value="tree">Arbo.</option>
-            </select>
-          </label>
-          <button id="delete-edge-btn" class="btn btn-inline">
-            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12"/><path d="M18 6 6 18"/></svg>
-            <span>Suppr. lien</span>
-          </button>
-        </div>
-
-        <div class="group compact">
-          <span class="group-title">Export</span>
-          <label>Zone
-            <select id="export-region">
-              <option value="all">Carte entière</option>
-              <option value="visible">Vue visible</option>
-              <option value="subtree">Sous-arbre</option>
-            </select>
-          </label>
-          <label>Échelle
-            <select id="export-scale">
-              <option value="1">1x</option>
-              <option value="2" selected>2x</option>
-              <option value="3">3x</option>
-            </select>
-          </label>
-          <label>DPI
-            <input id="export-dpi" type="number" min="72" max="600" step="1" value="144" />
-          </label>
-          <label class="check-inline"><input id="export-transparent" type="checkbox" />Transparent</label>
-          <button id="export-svg-btn" class="btn btn-inline">
-            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16V4H4z"/><path d="M8 14c0-2 3-2 3-4s-3-2-3-4"/><path d="M16 10h-3v6h3"/></svg>
-            <span>SVG</span>
-          </button>
-          <button id="export-png-btn" class="btn btn-primary btn-inline">
-            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="m7 15 3-3 3 3 4-4 2 2"/></svg>
-            <span>PNG</span>
-          </button>
-        </div>
-
-        <div class="status-inline">
-          <span id="autosave-status" class="chip">Sauvegarde auto : en attente</span>
-          <span id="status" class="chip chip--muted"></span>
+        <div class="group compact" role="group" aria-label="Style global des liens">
+          <label for="edge-shape-global">Traits</label>
+          <select id="edge-shape-global" aria-label="Forme globale des liens">
+            <option value="geometrique">Géométrique</option>
+            <option value="arrondi">Arrondi</option>
+            <option value="courbe">Courbe</option>
+          </select>
         </div>
       </div>
     </header>
@@ -157,10 +54,6 @@
               <button id="qa-add-child" title="Ajouter un enfant" aria-label="Ajouter un enfant">
                 <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6v12M8 12h9"/><path d="m14 8 3 4-3 4"/></svg>
                 <span>Enfant</span>
-              </button>
-              <button id="qa-link" title="Créer un lien" aria-label="Créer un lien">
-                <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 13.5 13.5 10.5"/><path d="M7.2 14.8 5 17a3 3 0 0 0 4.2 4.2l2.2-2.2"/><path d="M16.8 9.2 19 7a3 3 0 1 0-4.2-4.2l-2.2 2.2"/></svg>
-                <span>Lier</span>
               </button>
               <button id="qa-rename" title="Renommer" aria-label="Renommer">
                 <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l10-10-4-4L4 16v4z"/><path d="m12 6 4 4"/></svg>
@@ -203,6 +96,29 @@
               </div>
             </div>
           </div>
+          <div id="edge-quick-actions" class="edge-quick-actions" hidden>
+            <label>Titre du lien
+              <input id="edge-title" type="text" placeholder="Lien" />
+            </label>
+            <div class="edge-quick-row">
+              <label>Couleur
+                <input id="edge-color" type="color" value="#6d86b8" />
+              </label>
+              <label>Trait
+                <select id="edge-style">
+                  <option value="solid">Continu</option>
+                  <option value="dashed">Tiret</option>
+                  <option value="dotted">Pointillé</option>
+                </select>
+              </label>
+            </div>
+            <div class="edge-quick-row">
+              <button id="delete-edge-btn" class="btn btn-danger btn-inline" type="button">
+                <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M8 7l1 12h6l1-12"/></svg>
+                <span>Suppr. lien</span>
+              </button>
+            </div>
+          </div>
           <svg id="edges" class="edges"></svg>
           <div id="nodes" class="nodes"></div>
         </div>
@@ -214,18 +130,91 @@
               <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
               <span>Créer une racine</span>
             </button>
-            <button id="empty-template-btn" class="btn btn-inline">
-              <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z"/></svg>
-              <span>Appliquer un modèle</span>
-            </button>
           </div>
         </div>
       </section>
     </main>
 
+    <div class="fab-data-switch" role="group" aria-label="Données">
+      <button id="open-import-btn" class="btn btn-inline" type="button" aria-label="Importer JSON">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21V9"/><path d="m17 14-5-5-5 5"/><path d="M4 3h16"/></svg>
+        <span>Importer</span>
+      </button>
+      <button id="open-export-modal-btn" class="btn btn-primary btn-inline" aria-label="Ouvrir l'export">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 21h16"/></svg>
+        <span>Exporter</span>
+      </button>
+      <input id="import-json-input" type="file" accept="application/json" hidden />
+    </div>
+
+    <div class="fab-layout" role="group" aria-label="Disposition">
+      <button id="layout-horizontal-btn" class="btn btn-inline" type="button" title="Disposition horizontale">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h18M3 12h18M3 17h18"/></svg>
+        <span>Horiz.</span>
+      </button>
+      <button id="layout-vertical-btn" class="btn btn-inline" type="button" title="Disposition verticale">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3v18M12 3v18M17 3v18"/></svg>
+        <span>Vert.</span>
+      </button>
+      <button id="layout-radial-btn" class="btn btn-inline" type="button" title="Disposition radiale">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12m-2.5 0a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0"/><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8"/></svg>
+        <span>Radiale</span>
+      </button>
+    </div>
+
+    <div id="export-modal" class="modal-backdrop" hidden>
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="export-modal-title">
+        <header class="modal-head">
+          <h2 id="export-modal-title">Exporter la carte</h2>
+          <button id="close-export-modal-btn" class="btn btn-inline" type="button" aria-label="Fermer la fenêtre">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12"/><path d="M18 6 6 18"/></svg>
+            <span>Fermer</span>
+          </button>
+        </header>
+        <div class="modal-body">
+          <label>Zone
+            <select id="export-region">
+              <option value="all">Carte entière</option>
+              <option value="visible">Vue visible</option>
+              <option value="subtree">Sous-arbre</option>
+            </select>
+          </label>
+          <label>Échelle
+            <select id="export-scale">
+              <option value="1">1x</option>
+              <option value="2" selected>2x</option>
+              <option value="3">3x</option>
+            </select>
+          </label>
+          <label>DPI
+            <input id="export-dpi" type="number" min="72" max="600" step="1" value="144" />
+          </label>
+          <label>Format
+            <select id="export-format">
+              <option value="png" selected>PNG</option>
+              <option value="svg">SVG</option>
+              <option value="json">JSON</option>
+            </select>
+          </label>
+          <label class="check-inline"><input id="export-transparent" type="checkbox" />Fond transparent</label>
+        </div>
+        <footer class="modal-foot">
+          <button id="run-export-json-btn" class="btn btn-inline" type="button">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H6a2 2 0 0 0-2 2v2"/><path d="M8 20H6a2 2 0 0 1-2-2v-2"/><path d="M16 4h2a2 2 0 0 1 2 2v2"/><path d="M16 20h2a2 2 0 0 0 2-2v-2"/><path d="M10 9h4M10 15h4"/></svg>
+            <span>Exporter JSON</span>
+          </button>
+          <button id="run-export-btn" class="btn btn-primary btn-inline" type="button">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 21h16"/></svg>
+            <span>Lancer l'export</span>
+          </button>
+        </footer>
+      </section>
+    </div>
+
     <template id="node-template">
       <div class="node" tabindex="0">
         <span class="node-title"></span>
+        <button class="node-handle" type="button" aria-label="Créer un lien"></button>
       </div>
     </template>
 

@@ -5,17 +5,16 @@ Webapp locale de mind mapping, sans build ni dependances externes.
 ## Fonctionnalites robustes
 
 1. Undo/Redo avec historique borne (boutons + raccourcis clavier)
-2. Autosave periodique + snapshots versionnes en localStorage
-3. Panneau de snapshots (liste datee, restauration, suppression unitaire ou totale)
-4. Validation stricte du JSON (IDs, references, cycles, structures)
-5. Gestion des liens: selection, suppression, changement de type
-6. Recherche de noeuds + navigation resultat suivant/precedent + centrage
-7. UX clavier: creation, suppression, save/load, recherche, mode lien
-8. Auto-layout: horizontal, vertical, radial
-9. Exports avances: region, echelle, DPI, fond transparent, PNG/SVG
-10. Rendu robuste: zoom/pan, render via requestAnimationFrame, interactions plus fluides
-11. Edition inline du titre par double-clic sur un noeud
-12. Tests Node pour validation/layout/history
+2. Autosave periodique en localStorage
+3. Validation stricte du JSON (IDs, references, cycles, structures)
+4. Gestion des liens: selection, suppression, changement de type
+5. UX clavier: creation, suppression, save/load, mode lien
+6. Auto-layout: horizontal, vertical, radial
+7. Exports avances: region, echelle, DPI, fond transparent, PNG/SVG
+8. Rendu robuste: zoom/pan, render via requestAnimationFrame, interactions fluides
+9. Edition inline du titre par double-clic sur un noeud
+10. Menu contextuel sur noeud (actions + style + presets)
+11. Tests Node pour validation/layout/history
 
 ## Lancer en local
 
@@ -42,7 +41,6 @@ node tests.js
 - `Ctrl/Cmd + Z`: undo
 - `Ctrl/Cmd + Shift + Z` ou `Ctrl/Cmd + Y`: redo
 - `Ctrl/Cmd + S`: sauvegarde immediate
-- `Ctrl/Cmd + F`: focus recherche
 - `Double-clic` sur un noeud: renommer inline (`Enter` valide, `Escape` annule)
 
 ## Fichiers

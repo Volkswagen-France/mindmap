@@ -16,6 +16,15 @@
     return typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value);
   }
 
+  function normalizeEdgeStyle(value) {
+    return value === "dashed" || value === "dotted" ? value : "solid";
+  }
+
+  function normalizeEdgeShape(value) {
+    if (value === "arrondi" || value === "courbe") return value;
+    return "geometrique";
+  }
+
   function buildNodeIndex(nodes) {
     const map = new Map();
     for (const node of nodes) {
@@ -142,7 +151,13 @@
         continue;
       }
       edgeSet.add(dedupeKey);
-      edges.push({ id, source, target, type });
+      const color = isHexColor(raw.color)
+        ? raw.color
+        : (type === "free" ? "#e15d44" : "#6d86b8");
+      const label = typeof raw.label === "string" ? raw.label.trim().slice(0, 80) : "";
+      const style = normalizeEdgeStyle(raw.style);
+      const shape = normalizeEdgeShape(raw.shape);
+      edges.push({ id, source, target, type, color, label, style, shape });
     }
 
     for (const node of nodes) {
@@ -151,7 +166,16 @@
         (edge) => edge.type === "tree" && edge.source === node.parentId && edge.target === node.id,
       );
       if (!hasTreeEdge) {
-        edges.push({ id: `tree-${node.parentId}-${node.id}`, source: node.parentId, target: node.id, type: "tree" });
+        edges.push({
+          id: `tree-${node.parentId}-${node.id}`,
+          source: node.parentId,
+          target: node.id,
+          type: "tree",
+          color: "#6d86b8",
+          label: "",
+          style: "solid",
+          shape: "geometrique",
+        });
       }
     }
 

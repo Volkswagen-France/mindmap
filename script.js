@@ -1,11 +1,16 @@
 const core = window.MindMapCore;
 
 const STORAGE_KEY = "mindmap-data-v2";
-const SNAPSHOT_KEY = "mindmap-snapshots-v2";
 const AUTOSAVE_INTERVAL_MS = 12000;
-const SNAPSHOT_INTERVAL_MS = 60000;
-const SNAPSHOT_LIMIT = 25;
 const SNAP_THRESHOLD = 18;
+const ROUTE_NODE_PADDING = 16;
+const ROUTE_STUB = 24;
+const ROUTE_CHANNEL = 28;
+const ROUTE_ALIGN_STEP = 14;
+const EDGE_OVERLAP_PENALTY = 10;
+const EDGE_CROSS_PENALTY = 140;
+const EDGE_TURN_PENALTY = 18;
+const EDGE_SHORT_SEGMENT_PENALTY = 12;
 
 const state = {
   graph: {
@@ -17,6 +22,7 @@ const state = {
   selectedEdgeId: null,
   linkMode: false,
   linkingFrom: null,
+  linkDraft: null,
   viewport: {
     x: 80,
     y: 80,
@@ -30,8 +36,10 @@ const state = {
   renderQueued: false,
   inlineEditNodeId: null,
   lastAutosaveAt: null,
-  lastSnapshotAt: 0,
   lastSavedHash: "",
+  preferredLayout: "horizontal",
+  defaultEdgeShape: "arrondi",
+  edgeRouteCache: new Map(),
 };
 
 const history = core.createHistory(250);
@@ -46,7 +54,6 @@ const els = {
   redoBtn: document.getElementById("redo-btn"),
   addRootBtn: document.getElementById("add-root-btn"),
   addChildBtn: document.getElementById("add-child-btn"),
-  linkModeBtn: document.getElementById("link-mode-btn"),
   deleteBtn: document.getElementById("delete-btn"),
   clearBtn: document.getElementById("clear-btn"),
   titleInput: document.getElementById("node-title"),
@@ -55,45 +62,40 @@ const els = {
   borderColorInput: document.getElementById("node-border-color"),
   borderWidthInput: document.getElementById("node-border-width"),
   radiusInput: document.getElementById("node-radius"),
-  edgeTypeSelect: document.getElementById("edge-type"),
+  edgeQuickActions: document.getElementById("edge-quick-actions"),
+  edgeTitleInput: document.getElementById("edge-title"),
+  edgeColorInput: document.getElementById("edge-color"),
+  edgeStyleSelect: document.getElementById("edge-style"),
+  edgeShapeGlobalSelect: document.getElementById("edge-shape-global"),
   deleteEdgeBtn: document.getElementById("delete-edge-btn"),
-  templateSelect: document.getElementById("template-select"),
-  applyTemplateBtn: document.getElementById("apply-template-btn"),
   layoutHorizontalBtn: document.getElementById("layout-horizontal-btn"),
   layoutVerticalBtn: document.getElementById("layout-vertical-btn"),
   layoutRadialBtn: document.getElementById("layout-radial-btn"),
-  saveBtn: document.getElementById("save-btn"),
-  loadBtn: document.getElementById("load-btn"),
-  exportJsonBtn: document.getElementById("export-json-btn"),
+  openImportBtn: document.getElementById("open-import-btn"),
   importJsonInput: document.getElementById("import-json-input"),
-  refreshSnapshotsBtn: document.getElementById("refresh-snapshots-btn"),
-  clearSnapshotsBtn: document.getElementById("clear-snapshots-btn"),
-  snapshotsList: document.getElementById("snapshots-list"),
   exportRegion: document.getElementById("export-region"),
   exportScale: document.getElementById("export-scale"),
   exportDpi: document.getElementById("export-dpi"),
   exportTransparent: document.getElementById("export-transparent"),
-  exportSvgBtn: document.getElementById("export-svg-btn"),
-  exportPngBtn: document.getElementById("export-png-btn"),
+  exportFormat: document.getElementById("export-format"),
+  openExportModalBtn: document.getElementById("open-export-modal-btn"),
+  exportModal: document.getElementById("export-modal"),
+  closeExportModalBtn: document.getElementById("close-export-modal-btn"),
+  runExportJsonBtn: document.getElementById("run-export-json-btn"),
+  runExportBtn: document.getElementById("run-export-btn"),
   quickActions: document.getElementById("node-quick-actions"),
   qaAddChildBtn: document.getElementById("qa-add-child"),
-  qaLinkBtn: document.getElementById("qa-link"),
   qaRenameBtn: document.getElementById("qa-rename"),
   qaDeleteBtn: document.getElementById("qa-delete"),
   emptyState: document.getElementById("empty-state"),
   emptyCreateBtn: document.getElementById("empty-create-btn"),
-  emptyTemplateBtn: document.getElementById("empty-template-btn"),
-  autosaveStatus: document.getElementById("autosave-status"),
-  status: document.getElementById("status"),
 };
 
 function graphHash() {
   return JSON.stringify(state.graph);
 }
 
-function setStatus(message, isError) {
-  els.status.textContent = message || "";
-  els.status.style.color = isError ? "#ad2626" : "#5c647f";
+function setStatus(_message, _isError) {
 }
 
 function traduireErreurValidation(message) {
@@ -137,6 +139,599 @@ function getNode(id) {
 
 function getEdge(id) {
   return state.graph.edges.find((edge) => edge.id === id);
+}
+
+function getEdgeColor(edge) {
+  if (edge && typeof edge.color === "string" && /^#[0-9a-fA-F]{6}$/.test(edge.color)) {
+    return edge.color;
+  }
+  return edge && edge.type === "free" ? "#e15d44" : "#6d86b8";
+}
+
+function getEdgeStyle(edge) {
+  return edge && (edge.style === "dashed" || edge.style === "dotted") ? edge.style : "solid";
+}
+
+function getEdgeDashArray(edge) {
+  const style = getEdgeStyle(edge);
+  if (style === "dashed") return "7 5";
+  if (style === "dotted") return "2 5";
+  return "0";
+}
+
+function getEdgeShape(edge) {
+  if (edge && (edge.shape === "arrondi" || edge.shape === "courbe")) return edge.shape;
+  return "geometrique";
+}
+
+function normalizeEdgeShape(value) {
+  if (value === "arrondi" || value === "courbe") return value;
+  return "geometrique";
+}
+
+function deriveDefaultEdgeShapeFromGraph() {
+  if (!state.graph.edges.length) return state.defaultEdgeShape;
+  const counts = new Map([
+    ["geometrique", 0],
+    ["arrondi", 0],
+    ["courbe", 0],
+  ]);
+  for (const edge of state.graph.edges) {
+    const shape = getEdgeShape(edge);
+    counts.set(shape, (counts.get(shape) || 0) + 1);
+  }
+  let bestShape = "geometrique";
+  let maxCount = -1;
+  for (const [shape, count] of counts.entries()) {
+    if (count > maxCount) {
+      maxCount = count;
+      bestShape = shape;
+    }
+  }
+  return bestShape;
+}
+
+function buildObstacle(node, padding = 0) {
+  return {
+    left: node.x - padding,
+    top: node.y - padding,
+    right: node.x + core.NODE_WIDTH + padding,
+    bottom: node.y + core.NODE_HEIGHT + padding,
+  };
+}
+
+function pointInsideObstacle(point, obstacle) {
+  return (
+    point.x > obstacle.left
+    && point.x < obstacle.right
+    && point.y > obstacle.top
+    && point.y < obstacle.bottom
+  );
+}
+
+function segmentIntersectsObstacle(a, b, obstacle) {
+  const dx = Math.abs(a.x - b.x);
+  const dy = Math.abs(a.y - b.y);
+  if (dx < 0.01 && dy < 0.01) return false;
+  if (dx > 0.01 && dy > 0.01) return true;
+
+  if (dx < 0.01) {
+    const x = a.x;
+    const minY = Math.min(a.y, b.y);
+    const maxY = Math.max(a.y, b.y);
+    return x >= obstacle.left && x <= obstacle.right && maxY >= obstacle.top && minY <= obstacle.bottom;
+  }
+
+  const y = a.y;
+  const minX = Math.min(a.x, b.x);
+  const maxX = Math.max(a.x, b.x);
+  return y >= obstacle.top && y <= obstacle.bottom && maxX >= obstacle.left && minX <= obstacle.right;
+}
+
+function pathIntersectsObstacles(points, obstacles) {
+  if (!points || points.length < 2) return false;
+  for (const obstacle of obstacles) {
+    for (const point of points) {
+      if (pointInsideObstacle(point, obstacle)) return true;
+    }
+    for (let i = 0; i < points.length - 1; i += 1) {
+      if (segmentIntersectsObstacle(points[i], points[i + 1], obstacle)) return true;
+    }
+  }
+  return false;
+}
+
+function compressOrthogonalPath(points) {
+  const compact = [];
+  for (const point of points) {
+    const prev = compact[compact.length - 1];
+    if (!prev || Math.abs(prev.x - point.x) > 0.01 || Math.abs(prev.y - point.y) > 0.01) {
+      compact.push({ x: point.x, y: point.y });
+    }
+  }
+  let changed = true;
+  while (changed && compact.length >= 3) {
+    changed = false;
+    for (let i = 1; i < compact.length - 1; i += 1) {
+      const a = compact[i - 1];
+      const b = compact[i];
+      const c = compact[i + 1];
+      const collinearX = Math.abs(a.x - b.x) < 0.01 && Math.abs(b.x - c.x) < 0.01;
+      const collinearY = Math.abs(a.y - b.y) < 0.01 && Math.abs(b.y - c.y) < 0.01;
+      if (collinearX || collinearY) {
+        compact.splice(i, 1);
+        changed = true;
+        break;
+      }
+    }
+  }
+  return compact;
+}
+
+function polylineLength(points) {
+  if (!points || points.length < 2) return 0;
+  let total = 0;
+  for (let i = 0; i < points.length - 1; i += 1) {
+    total += Math.abs(points[i + 1].x - points[i].x) + Math.abs(points[i + 1].y - points[i].y);
+  }
+  return total;
+}
+
+function segmentLength(a, b) {
+  return Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
+}
+
+function alignToStep(value, step = ROUTE_ALIGN_STEP) {
+  return Math.round(value / step) * step;
+}
+
+function alignPathInterior(points, step = ROUTE_ALIGN_STEP) {
+  if (!points || points.length < 3) return points;
+  const aligned = points.map((point, index) => {
+    if (index === 0 || index === points.length - 1) {
+      return { x: Math.round(point.x), y: Math.round(point.y) };
+    }
+    return {
+      x: alignToStep(point.x, step),
+      y: alignToStep(point.y, step),
+    };
+  });
+  return compressOrthogonalPath(aligned);
+}
+
+function countTurns(points) {
+  if (!points || points.length < 3) return 0;
+  let turns = 0;
+  for (let i = 1; i < points.length - 1; i += 1) {
+    const a = points[i - 1];
+    const b = points[i];
+    const c = points[i + 1];
+    const abVertical = Math.abs(a.x - b.x) < 0.01;
+    const bcVertical = Math.abs(b.x - c.x) < 0.01;
+    const abHorizontal = Math.abs(a.y - b.y) < 0.01;
+    const bcHorizontal = Math.abs(b.y - c.y) < 0.01;
+    const isTurn = (abVertical && bcHorizontal) || (abHorizontal && bcVertical);
+    if (isTurn) turns += 1;
+  }
+  return turns;
+}
+
+function shortSegmentPenalty(points) {
+  if (!points || points.length < 2) return 0;
+  let penalty = 0;
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const len = segmentLength(points[i], points[i + 1]);
+    if (len > 0 && len < ROUTE_CHANNEL * 0.7) {
+      penalty += EDGE_SHORT_SEGMENT_PENALTY;
+    }
+  }
+  return penalty;
+}
+
+function rangeOverlap(a1, a2, b1, b2) {
+  const start = Math.max(Math.min(a1, a2), Math.min(b1, b2));
+  const end = Math.min(Math.max(a1, a2), Math.max(b1, b2));
+  return Math.max(0, end - start);
+}
+
+function segmentConflictCost(a, b, c, d) {
+  const abVertical = Math.abs(a.x - b.x) < 0.01;
+  const cdVertical = Math.abs(c.x - d.x) < 0.01;
+  const abHorizontal = Math.abs(a.y - b.y) < 0.01;
+  const cdHorizontal = Math.abs(c.y - d.y) < 0.01;
+
+  if ((abVertical && cdVertical && Math.abs(a.x - c.x) < 0.01)) {
+    const overlap = rangeOverlap(a.y, b.y, c.y, d.y);
+    return overlap * EDGE_OVERLAP_PENALTY;
+  }
+  if ((abHorizontal && cdHorizontal && Math.abs(a.y - c.y) < 0.01)) {
+    const overlap = rangeOverlap(a.x, b.x, c.x, d.x);
+    return overlap * EDGE_OVERLAP_PENALTY;
+  }
+
+  if ((abVertical && cdHorizontal) || (abHorizontal && cdVertical)) {
+    const v1 = abVertical ? a : c;
+    const v2 = abVertical ? b : d;
+    const h1 = abHorizontal ? a : c;
+    const h2 = abHorizontal ? b : d;
+    const vx = v1.x;
+    const hy = h1.y;
+    const onV = hy >= Math.min(v1.y, v2.y) && hy <= Math.max(v1.y, v2.y);
+    const onH = vx >= Math.min(h1.x, h2.x) && vx <= Math.max(h1.x, h2.x);
+    if (onV && onH) return EDGE_CROSS_PENALTY;
+  }
+  return 0;
+}
+
+function pathConflictScore(points, occupiedSegments) {
+  if (!points || points.length < 2 || !occupiedSegments.length) return 0;
+  let score = 0;
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const a = points[i];
+    const b = points[i + 1];
+    if (segmentLength(a, b) < 0.01) continue;
+    for (const existing of occupiedSegments) {
+      score += segmentConflictCost(a, b, existing.a, existing.b);
+    }
+  }
+  return score;
+}
+
+function addPathSegments(points, occupiedSegments) {
+  if (!points || points.length < 2) return;
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const a = points[i];
+    const b = points[i + 1];
+    if (segmentLength(a, b) < 0.01) continue;
+    occupiedSegments.push({ a: { x: a.x, y: a.y }, b: { x: b.x, y: b.y } });
+  }
+}
+
+function polylineMidpoint(points) {
+  if (!points || points.length === 0) return { x: 0, y: 0 };
+  if (points.length === 1) return { x: points[0].x, y: points[0].y };
+  const total = polylineLength(points);
+  if (total <= 0.01) {
+    const first = points[0];
+    return { x: first.x, y: first.y };
+  }
+  const target = total / 2;
+  let walked = 0;
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const a = points[i];
+    const b = points[i + 1];
+    const seg = Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
+    if (walked + seg >= target) {
+      const ratio = (target - walked) / Math.max(0.0001, seg);
+      return {
+        x: a.x + (b.x - a.x) * ratio,
+        y: a.y + (b.y - a.y) * ratio,
+      };
+    }
+    walked += seg;
+  }
+  const last = points[points.length - 1];
+  return { x: last.x, y: last.y };
+}
+
+function edgeAnchors(source, target) {
+  const sx = source.x + core.NODE_WIDTH / 2;
+  const sy = source.y + core.NODE_HEIGHT / 2;
+  const tx = target.x + core.NODE_WIDTH / 2;
+  const ty = target.y + core.NODE_HEIGHT / 2;
+  const dx = tx - sx;
+  const dy = ty - sy;
+
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    if (dx >= 0) {
+      return {
+        start: { x: source.x + core.NODE_WIDTH, y: sy, side: "right" },
+        end: { x: target.x, y: ty, side: "left" },
+      };
+    }
+    return {
+      start: { x: source.x, y: sy, side: "left" },
+      end: { x: target.x + core.NODE_WIDTH, y: ty, side: "right" },
+    };
+  }
+  if (dy >= 0) {
+    return {
+      start: { x: sx, y: source.y + core.NODE_HEIGHT, side: "bottom" },
+      end: { x: tx, y: target.y, side: "top" },
+    };
+  }
+  return {
+    start: { x: sx, y: source.y, side: "top" },
+    end: { x: tx, y: target.y + core.NODE_HEIGHT, side: "bottom" },
+  };
+}
+
+function anchorStub(anchor, distance = ROUTE_STUB) {
+  if (anchor.side === "right") return { x: anchor.x + distance, y: anchor.y };
+  if (anchor.side === "left") return { x: anchor.x - distance, y: anchor.y };
+  if (anchor.side === "bottom") return { x: anchor.x, y: anchor.y + distance };
+  return { x: anchor.x, y: anchor.y - distance };
+}
+
+function uniqueSortedCandidates(values, center) {
+  const dedupe = new Set();
+  const list = [];
+  for (const raw of values) {
+    if (!Number.isFinite(raw)) continue;
+    const value = alignToStep(raw);
+    if (dedupe.has(value)) continue;
+    dedupe.add(value);
+    list.push(value);
+  }
+  const alignedCenter = alignToStep(center);
+  list.sort((a, b) => Math.abs(a - alignedCenter) - Math.abs(b - alignedCenter));
+  return list;
+}
+
+function routeOrthogonal(start, end, obstacles, bounds, occupiedSegments = []) {
+  const candidates = [];
+
+  candidates.push([start, end]);
+  candidates.push([start, { x: end.x, y: start.y }, end]);
+  candidates.push([start, { x: start.x, y: end.y }, end]);
+
+  const minX = bounds.x - ROUTE_CHANNEL * 4;
+  const maxX = bounds.x + bounds.width + ROUTE_CHANNEL * 4;
+  const minY = bounds.y - ROUTE_CHANNEL * 4;
+  const maxY = bounds.y + bounds.height + ROUTE_CHANNEL * 4;
+
+  const xCandidates = uniqueSortedCandidates(
+    [
+      start.x,
+      end.x,
+      (start.x + end.x) / 2,
+      minX,
+      maxX,
+      ...obstacles.flatMap((o) => [o.left - ROUTE_CHANNEL, o.right + ROUTE_CHANNEL]),
+    ],
+    (start.x + end.x) / 2,
+  );
+  const yCandidates = uniqueSortedCandidates(
+    [
+      start.y,
+      end.y,
+      (start.y + end.y) / 2,
+      minY,
+      maxY,
+      ...obstacles.flatMap((o) => [o.top - ROUTE_CHANNEL, o.bottom + ROUTE_CHANNEL]),
+    ],
+    (start.y + end.y) / 2,
+  );
+
+  for (const x of xCandidates.slice(0, 12)) {
+    candidates.push([start, { x, y: start.y }, { x, y: end.y }, end]);
+  }
+  for (const y of yCandidates.slice(0, 12)) {
+    candidates.push([start, { x: start.x, y }, { x: end.x, y }, end]);
+  }
+  for (const x of xCandidates.slice(0, 8)) {
+    for (const y of yCandidates.slice(0, 8)) {
+      candidates.push([start, { x, y: start.y }, { x, y }, { x: end.x, y }, end]);
+      candidates.push([start, { x: start.x, y }, { x, y }, { x, y: end.y }, end]);
+    }
+  }
+
+  let best = null;
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (const rawPath of candidates) {
+    const path = alignPathInterior(compressOrthogonalPath(rawPath));
+    if (pathIntersectsObstacles(path, obstacles)) continue;
+    const score = polylineLength(path)
+      + pathConflictScore(path, occupiedSegments)
+      + countTurns(path) * EDGE_TURN_PENALTY
+      + shortSegmentPenalty(path);
+    if (score < bestScore) {
+      best = path;
+      bestScore = score;
+    }
+  }
+  return best || alignPathInterior(compressOrthogonalPath([start, end]));
+}
+
+function pointsToPathData(points, offsetX = 0, offsetY = 0) {
+  if (!points || points.length === 0) return "";
+  let d = `M ${points[0].x - offsetX} ${points[0].y - offsetY}`;
+  for (let i = 1; i < points.length; i += 1) {
+    d += ` L ${points[i].x - offsetX} ${points[i].y - offsetY}`;
+  }
+  return d;
+}
+
+function smoothCurvePathData(points, offsetX = 0, offsetY = 0) {
+  if (!points || points.length === 0) return "";
+  if (points.length < 3) return pointsToPathData(points, offsetX, offsetY);
+  const first = points[0];
+  let d = `M ${first.x - offsetX} ${first.y - offsetY}`;
+  for (let i = 1; i < points.length - 1; i += 1) {
+    const current = points[i];
+    const next = points[i + 1];
+    const mx = (current.x + next.x) / 2;
+    const my = (current.y + next.y) / 2;
+    d += ` Q ${current.x - offsetX} ${current.y - offsetY}, ${mx - offsetX} ${my - offsetY}`;
+  }
+  const beforeLast = points[points.length - 2];
+  const last = points[points.length - 1];
+  d += ` Q ${beforeLast.x - offsetX} ${beforeLast.y - offsetY}, ${last.x - offsetX} ${last.y - offsetY}`;
+  return d;
+}
+
+function roundedPathData(points, offsetX = 0, offsetY = 0, radius = 14) {
+  if (!points || points.length === 0) return "";
+  if (points.length < 3) return pointsToPathData(points, offsetX, offsetY);
+  let d = `M ${points[0].x - offsetX} ${points[0].y - offsetY}`;
+  for (let i = 1; i < points.length - 1; i += 1) {
+    const a = points[i - 1];
+    const b = points[i];
+    const c = points[i + 1];
+    const len1 = Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
+    const len2 = Math.abs(c.x - b.x) + Math.abs(c.y - b.y);
+    if (len1 < 0.01 || len2 < 0.01) continue;
+    const r = Math.min(radius, len1 / 2, len2 / 2);
+    const ux1 = (b.x - a.x) / len1;
+    const uy1 = (b.y - a.y) / len1;
+    const ux2 = (c.x - b.x) / len2;
+    const uy2 = (c.y - b.y) / len2;
+    const pIn = { x: b.x - ux1 * r, y: b.y - uy1 * r };
+    const pOut = { x: b.x + ux2 * r, y: b.y + uy2 * r };
+    d += ` L ${pIn.x - offsetX} ${pIn.y - offsetY}`;
+    d += ` Q ${b.x - offsetX} ${b.y - offsetY}, ${pOut.x - offsetX} ${pOut.y - offsetY}`;
+  }
+  const last = points[points.length - 1];
+  d += ` L ${last.x - offsetX} ${last.y - offsetY}`;
+  return d;
+}
+
+function edgePathDataForShape(points, shape, offsetX = 0, offsetY = 0) {
+  if (shape === "courbe") return smoothCurvePathData(points, offsetX, offsetY);
+  if (shape === "arrondi") return roundedPathData(points, offsetX, offsetY);
+  return pointsToPathData(points, offsetX, offsetY);
+}
+
+function drawEdgePathOnCanvas(ctx, points, shape, offsetX = 0, offsetY = 0) {
+  if (!points || points.length === 0) return;
+  const first = points[0];
+  ctx.moveTo(first.x - offsetX, first.y - offsetY);
+  if (points.length < 2) return;
+
+  if (shape === "courbe") {
+    if (points.length < 3) {
+      ctx.lineTo(points[1].x - offsetX, points[1].y - offsetY);
+      return;
+    }
+    for (let i = 1; i < points.length - 1; i += 1) {
+      const current = points[i];
+      const next = points[i + 1];
+      const mx = (current.x + next.x) / 2;
+      const my = (current.y + next.y) / 2;
+      ctx.quadraticCurveTo(current.x - offsetX, current.y - offsetY, mx - offsetX, my - offsetY);
+    }
+    const beforeLast = points[points.length - 2];
+    const last = points[points.length - 1];
+    ctx.quadraticCurveTo(beforeLast.x - offsetX, beforeLast.y - offsetY, last.x - offsetX, last.y - offsetY);
+    return;
+  }
+
+  if (shape === "arrondi" && points.length >= 3) {
+    const radius = 14;
+    for (let i = 1; i < points.length - 1; i += 1) {
+      const a = points[i - 1];
+      const b = points[i];
+      const c = points[i + 1];
+      const len1 = Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
+      const len2 = Math.abs(c.x - b.x) + Math.abs(c.y - b.y);
+      if (len1 < 0.01 || len2 < 0.01) continue;
+      const r = Math.min(radius, len1 / 2, len2 / 2);
+      const ux1 = (b.x - a.x) / len1;
+      const uy1 = (b.y - a.y) / len1;
+      const ux2 = (c.x - b.x) / len2;
+      const uy2 = (c.y - b.y) / len2;
+      const pIn = { x: b.x - ux1 * r, y: b.y - uy1 * r };
+      const pOut = { x: b.x + ux2 * r, y: b.y + uy2 * r };
+      ctx.lineTo(pIn.x - offsetX, pIn.y - offsetY);
+      ctx.quadraticCurveTo(b.x - offsetX, b.y - offsetY, pOut.x - offsetX, pOut.y - offsetY);
+    }
+    const last = points[points.length - 1];
+    ctx.lineTo(last.x - offsetX, last.y - offsetY);
+    return;
+  }
+
+  for (let i = 1; i < points.length; i += 1) {
+    ctx.lineTo(points[i].x - offsetX, points[i].y - offsetY);
+  }
+}
+
+function computeEdgeRoute(edge, occupiedSegments = []) {
+  const source = getNode(edge.source);
+  const target = getNode(edge.target);
+  if (!source || !target) return null;
+
+  const anchors = edgeAnchors(source, target);
+  const start = { x: anchors.start.x, y: anchors.start.y };
+  const end = { x: anchors.end.x, y: anchors.end.y };
+  const startStub = anchorStub(anchors.start);
+  const endStub = anchorStub(anchors.end);
+  const obstacles = state.graph.nodes
+    .filter((node) => node.id !== source.id && node.id !== target.id)
+    .map((node) => buildObstacle(node, ROUTE_NODE_PADDING));
+  const bounds = core.getBounds(state.graph.nodes);
+
+  const middle = routeOrthogonal(startStub, endStub, obstacles, bounds, occupiedSegments);
+  const points = compressOrthogonalPath([start, startStub, ...middle, endStub, end]);
+  const mid = polylineMidpoint(points);
+
+  return {
+    points,
+    path: pointsToPathData(points),
+    mid,
+  };
+}
+
+function computeOrderedRouteForEdge(edgeId) {
+  const occupied = [];
+  for (const edge of state.graph.edges) {
+    const route = computeEdgeRoute(edge, occupied);
+    if (!route) continue;
+    if (edge.id === edgeId) return route;
+    addPathSegments(route.points, occupied);
+  }
+  return null;
+}
+
+function createFreeEdge(sourceId, targetId) {
+  if (!sourceId || !targetId || sourceId === targetId) return;
+  const source = getNode(sourceId);
+  const target = getNode(targetId);
+  if (!source || !target) return;
+  const exists = state.graph.edges.some(
+    (edge) => edge.source === sourceId && edge.target === targetId && edge.type === "free",
+  );
+  if (exists) return;
+  commit(() => {
+    state.graph.edges.push({
+      id: `free-${sourceId}-${targetId}-${Date.now()}`,
+      source: sourceId,
+      target: targetId,
+      type: "free",
+      color: "#e15d44",
+      label: "",
+      style: "dashed",
+      shape: state.defaultEdgeShape,
+    });
+    state.selectedEdgeId = null;
+    state.selectedNodeId = targetId;
+  }, "Lien créé");
+}
+
+function applyPreferredLayout(graph) {
+  const mode = state.preferredLayout || "horizontal";
+  return core.layoutGraph(graph, mode);
+}
+
+function startLinkDraft(sourceId) {
+  const source = getNode(sourceId);
+  if (!source) return;
+  state.linkMode = true;
+  state.linkDraft = {
+    sourceId,
+  };
+  requestRender();
+}
+
+function finishLinkDraft(targetNodeId) {
+  if (!state.linkDraft) return;
+  const sourceId = state.linkDraft.sourceId;
+  state.linkDraft = null;
+  state.linkMode = false;
+  if (targetNodeId) {
+    createFreeEdge(sourceId, targetNodeId);
+  } else {
+    requestRender();
+  }
 }
 
 function magnetiserPositionNoeud(nodeId, x, y) {
@@ -288,21 +883,25 @@ function commit(mutator, label) {
   if (!changed) return false;
 
   history.push(before);
+  saveNow();
   setStatus(label || "Mis à jour", false);
   requestRender();
   return true;
 }
 
 function applyGraph(nextGraph, label) {
-  const validated = core.validateAndNormalizeData(nextGraph);
+  const graphToApply = applyPreferredLayout(nextGraph);
+  const validated = core.validateAndNormalizeData(graphToApply);
   if (!validated.ok) {
     setStatus(`Carte invalide : ${traduireErreurValidation(validated.errors[0])}`, true);
     return false;
   }
   state.graph = validated.data;
-  state.selectedNodeId = state.graph.nodes[0] ? state.graph.nodes[0].id : null;
+  state.selectedNodeId = null;
   state.selectedEdgeId = null;
   state.linkingFrom = null;
+  state.defaultEdgeShape = deriveDefaultEdgeShapeFromGraph();
+  saveNow();
   setStatus(label || "Chargé", false);
   requestRender();
   return true;
@@ -327,7 +926,9 @@ function selectEdge(id) {
   state.selectedNodeId = null;
   const edge = getEdge(id);
   if (edge) {
-    els.edgeTypeSelect.value = edge.type;
+    els.edgeTitleInput.value = edge.label || "";
+    els.edgeColorInput.value = getEdgeColor(edge);
+    els.edgeStyleSelect.value = getEdgeStyle(edge);
   }
   requestRender();
 }
@@ -336,6 +937,7 @@ function clearSelection() {
   state.selectedNodeId = null;
   state.selectedEdgeId = null;
   state.linkingFrom = null;
+  state.linkDraft = null;
   requestRender();
 }
 
@@ -364,6 +966,9 @@ function createNode({
     state.graph.nodes.push({ id, x, y, title, color, textColor, borderColor, borderWidth, radius, parentId });
     if (parentId) {
       state.graph.edges.push({ id: `tree-${parentId}-${id}`, source: parentId, target: id, type: "tree" });
+    }
+    if (state.preferredLayout) {
+      state.graph = core.layoutGraph(state.graph, state.preferredLayout);
     }
     state.selectedNodeId = id;
     state.selectedEdgeId = null;
@@ -400,6 +1005,9 @@ function deleteSelected() {
     const subtree = core.collectSubtreeIds(state.graph.nodes, state.selectedNodeId);
     state.graph.nodes = state.graph.nodes.filter((node) => !subtree.has(node.id));
     state.graph.edges = state.graph.edges.filter((edge) => !subtree.has(edge.source) && !subtree.has(edge.target));
+    if (state.preferredLayout) {
+      state.graph = core.layoutGraph(state.graph, state.preferredLayout);
+    }
     state.selectedNodeId = null;
   }, "Nœud supprimé");
 }
@@ -413,10 +1021,15 @@ function deleteSelectedEdge() {
 }
 
 function toggleLinkMode() {
-  state.linkMode = !state.linkMode;
-  state.linkingFrom = null;
-  setStatus(`Mode lien ${state.linkMode ? "activé" : "désactivé"}`, false);
-  requestRender();
+  if (state.linkDraft) {
+    finishLinkDraft(null);
+    return;
+  }
+  if (state.selectedNodeId && getNode(state.selectedNodeId)) {
+    startLinkDraft(state.selectedNodeId);
+  } else {
+    setStatus("Sélectionnez d'abord un nœud", true);
+  }
 }
 
 function applyNodeStylePreset(preset) {
@@ -442,42 +1055,12 @@ function applyNodeStylePreset(preset) {
 }
 
 function onNodeClick(nodeId) {
-  if (state.linkMode) {
-    if (!state.linkingFrom) {
-      state.linkingFrom = nodeId;
-      selectNode(nodeId);
-      setStatus("Choisissez le nœud cible", false);
-      return;
-    }
-
-    if (state.linkingFrom === nodeId) {
-      state.linkingFrom = null;
-      setStatus("Lien annulé", false);
-      requestRender();
-      return;
-    }
-
-    const sourceId = state.linkingFrom;
-    state.linkingFrom = null;
-    const exists = state.graph.edges.some(
-      (edge) => edge.source === sourceId && edge.target === nodeId && edge.type === "free",
-    );
-
-    commit(() => {
-      if (!exists) {
-        state.graph.edges.push({ id: `free-${sourceId}-${nodeId}-${Date.now()}`, source: sourceId, target: nodeId, type: "free" });
-      }
-      state.selectedEdgeId = null;
-      state.selectedNodeId = nodeId;
-    }, exists ? "Lien déjà existant" : "Lien créé");
-    return;
-  }
-
   selectNode(nodeId);
 }
 
 function runLayout(mode) {
   const libelle = mode === "horizontal" ? "horizontale" : mode === "vertical" ? "verticale" : "radiale";
+  state.preferredLayout = mode;
   commit(() => {
     state.graph = core.layoutGraph(state.graph, mode);
     if (state.selectedNodeId) {
@@ -488,12 +1071,16 @@ function runLayout(mode) {
 
 function appliquerTemplateSelectionne() {
   const type = els.templateSelect.value || "produit";
-  const graph = genererTemplate(type);
+  let graph = genererTemplate(type);
+  if (state.preferredLayout) {
+    graph = core.layoutGraph(graph, state.preferredLayout);
+  }
   history.clear();
   const ok = applyGraph(graph, "Modèle appliqué");
   if (!ok) return;
-  state.selectedNodeId = state.graph.nodes[0] ? state.graph.nodes[0].id : null;
-  centerOnNode(state.selectedNodeId);
+  if (state.graph.nodes[0]) {
+    centerOnNode(state.graph.nodes[0].id);
+  }
 }
 
 function undo() {
@@ -535,95 +1122,6 @@ function saveNow() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
   state.lastAutosaveAt = Date.now();
   state.lastSavedHash = graphHash();
-  els.autosaveStatus.textContent = `Sauvegarde auto : enregistrée à ${new Date(state.lastAutosaveAt).toLocaleTimeString()}`;
-}
-
-function getSnapshots() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(SNAPSHOT_KEY) || "[]");
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveSnapshots(snapshots) {
-  localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshots.slice(-SNAPSHOT_LIMIT)));
-}
-
-function renderSnapshotList() {
-  if (!els.snapshotsList) return;
-  const snapshots = getSnapshots();
-  if (snapshots.length === 0) {
-    els.snapshotsList.innerHTML = `<p class="subtle">Aucun instantané.</p>`;
-    return;
-  }
-
-  const entries = [];
-  for (let idx = snapshots.length - 1; idx >= 0; idx -= 1) {
-    const snapshot = snapshots[idx];
-      const dt = new Date(snapshot.timestamp);
-      const dateText = Number.isNaN(dt.getTime()) ? snapshot.timestamp : dt.toLocaleString();
-      entries.push(`<div class="snapshot-item">
-        <div class="snapshot-time">${escapeXml(dateText)}</div>
-        <div class="snapshot-actions">
-          <button data-action="restore-snapshot" data-index="${idx}">Restaurer</button>
-          <button data-action="delete-snapshot" data-index="${idx}">Supprimer</button>
-        </div>
-      </div>`);
-  }
-
-  els.snapshotsList.innerHTML = entries.join("");
-}
-
-function restoreSnapshotAt(index) {
-  const snapshots = getSnapshots();
-  const snapshot = snapshots[index];
-  if (!snapshot || !snapshot.graph) {
-    setStatus("Instantané introuvable", true);
-    return;
-  }
-
-  const validated = core.validateAndNormalizeData(snapshot.graph);
-  if (!validated.ok) {
-    setStatus(`Instantané invalide : ${traduireErreurValidation(validated.errors[0])}`, true);
-    return;
-  }
-
-  history.clear();
-  state.graph = validated.data;
-  state.inlineEditNodeId = null;
-  state.selectedNodeId = state.graph.nodes[0] ? state.graph.nodes[0].id : null;
-  state.selectedEdgeId = null;
-  state.lastSavedHash = graphHash();
-  requestRender();
-  setStatus(`Instantané restauré (${new Date(snapshot.timestamp).toLocaleString()})`, false);
-}
-
-function deleteSnapshotAt(index) {
-  const snapshots = getSnapshots();
-  if (index < 0 || index >= snapshots.length) return;
-  snapshots.splice(index, 1);
-  saveSnapshots(snapshots);
-  renderSnapshotList();
-  setStatus("Instantané supprimé", false);
-}
-
-function clearAllSnapshots() {
-  saveSnapshots([]);
-  renderSnapshotList();
-  setStatus("Tous les instantanés ont été supprimés", false);
-}
-
-function addSnapshot() {
-  const snapshots = getSnapshots();
-  snapshots.push({
-    timestamp: new Date().toISOString(),
-    graph: core.cloneGraph(state.graph),
-  });
-  saveSnapshots(snapshots);
-  renderSnapshotList();
-  state.lastSnapshotAt = Date.now();
 }
 
 function loadNow() {
@@ -640,10 +1138,10 @@ function loadNow() {
       return;
     }
     history.clear();
-    state.graph = validated.data;
+    state.graph = applyPreferredLayout(validated.data);
     state.inlineEditNodeId = null;
     state.lastSavedHash = graphHash();
-    state.selectedNodeId = state.graph.nodes[0] ? state.graph.nodes[0].id : null;
+    state.selectedNodeId = null;
     state.selectedEdgeId = null;
     setStatus("Chargée depuis le stockage local", false);
     requestRender();
@@ -656,29 +1154,6 @@ function runAutosave() {
   const hash = graphHash();
   if (hash === state.lastSavedHash) return;
   saveNow();
-  const now = Date.now();
-  if (now - state.lastSnapshotAt > SNAPSHOT_INTERVAL_MS) {
-    addSnapshot();
-  }
-}
-
-function loadLatestSnapshotFallback() {
-  const raw = localStorage.getItem(SNAPSHOT_KEY);
-  if (!raw) return false;
-  try {
-    const snapshots = JSON.parse(raw);
-    if (!Array.isArray(snapshots) || snapshots.length === 0) return false;
-    const latest = snapshots[snapshots.length - 1];
-    if (!latest || !latest.graph) return false;
-    const validated = core.validateAndNormalizeData(latest.graph);
-    if (!validated.ok) return false;
-    state.graph = validated.data;
-    state.inlineEditNodeId = null;
-    setStatus(`Instantané récupéré depuis ${latest.timestamp}`, false);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function parseImport(data) {
@@ -753,6 +1228,39 @@ function getExportContext() {
   };
 }
 
+function isExportModalOpen() {
+  return !els.exportModal.hidden;
+}
+
+function openExportModal() {
+  els.exportModal.hidden = false;
+}
+
+function closeExportModal() {
+  els.exportModal.hidden = true;
+}
+
+function runExportFromModal() {
+  const format = (els.exportFormat.value || "png").toLowerCase();
+  if (format === "svg") {
+    exportSvg();
+    setStatus("Export SVG généré", false);
+  } else if (format === "json") {
+    exportJson();
+    setStatus("Export JSON généré", false);
+  } else {
+    exportPng();
+    setStatus("Export PNG généré", false);
+  }
+  closeExportModal();
+}
+
+function runExportJsonFromModal() {
+  exportJson();
+  setStatus("Export JSON généré", false);
+  closeExportModal();
+}
+
 function edgeVisible(edge, nodeIds) {
   if (!nodeIds) return true;
   return nodeIds.has(edge.source) && nodeIds.has(edge.target);
@@ -765,25 +1273,27 @@ function renderToCanvas(ctx, bounds, nodeIds, transparent) {
   }
 
   ctx.lineCap = "round";
+  const occupied = [];
 
   for (const edge of state.graph.edges) {
     if (!edgeVisible(edge, nodeIds)) continue;
-    const source = getNode(edge.source);
-    const target = getNode(edge.target);
-    if (!source || !target) continue;
-    const x1 = source.x + core.NODE_WIDTH / 2 - bounds.x;
-    const y1 = source.y + core.NODE_HEIGHT / 2 - bounds.y;
-    const x2 = target.x + core.NODE_WIDTH / 2 - bounds.x;
-    const y2 = target.y + core.NODE_HEIGHT / 2 - bounds.y;
-    const cx = (x1 + x2) / 2;
+    const route = computeEdgeRoute(edge, occupied);
+    if (!route) continue;
 
     ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.bezierCurveTo(cx, y1, cx, y2, x2, y2);
-    ctx.strokeStyle = edge.type === "free" ? "#e15d44" : "#6d86b8";
+    drawEdgePathOnCanvas(ctx, route.points, getEdgeShape(edge), bounds.x, bounds.y);
+    ctx.strokeStyle = getEdgeColor(edge);
     ctx.lineWidth = edge.id === state.selectedEdgeId ? 3.5 : edge.type === "free" ? 2.4 : 2;
-    ctx.setLineDash(edge.type === "free" ? [6, 5] : []);
+    if (getEdgeStyle(edge) === "dashed") ctx.setLineDash([7, 5]);
+    else if (getEdgeStyle(edge) === "dotted") ctx.setLineDash([2, 5]);
+    else ctx.setLineDash([]);
     ctx.stroke();
+    if (edge.label) {
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#2a3140";
+      ctx.fillText(edge.label, route.mid.x - bounds.x, route.mid.y - bounds.y - 8);
+    }
+    addPathSegments(route.points, occupied);
   }
 
   ctx.setLineDash([]);
@@ -827,22 +1337,22 @@ function exportSvg() {
   if (!transparent) {
     svg += `<rect width="100%" height="100%" fill="#f4f6fb" />`;
   }
+  const occupied = [];
 
   for (const edge of state.graph.edges) {
     if (!edgeVisible(edge, nodeIds)) continue;
-    const source = getNode(edge.source);
-    const target = getNode(edge.target);
-    if (!source || !target) continue;
-    const x1 = source.x + core.NODE_WIDTH / 2 - bounds.x;
-    const y1 = source.y + core.NODE_HEIGHT / 2 - bounds.y;
-    const x2 = target.x + core.NODE_WIDTH / 2 - bounds.x;
-    const y2 = target.y + core.NODE_HEIGHT / 2 - bounds.y;
-    const cx = (x1 + x2) / 2;
-    svg += `<path d="M ${x1} ${y1} C ${cx} ${y1}, ${cx} ${y2}, ${x2} ${y2}" fill="none" stroke="${
-      edge.type === "free" ? "#e15d44" : "#6d86b8"
-    }" stroke-width="${edge.id === state.selectedEdgeId ? 3.5 : edge.type === "free" ? 2.4 : 2}" ${
-      edge.type === "free" ? 'stroke-dasharray="6 5"' : ""
+    const route = computeEdgeRoute(edge, occupied);
+    if (!route) continue;
+    const dash = getEdgeStyle(edge) === "dashed" ? "7 5" : getEdgeStyle(edge) === "dotted" ? "2 5" : "";
+    svg += `<path d="${edgePathDataForShape(route.points, getEdgeShape(edge), bounds.x, bounds.y)}" fill="none" stroke="${getEdgeColor(
+      edge,
+    )}" stroke-width="${edge.id === state.selectedEdgeId ? 3.5 : edge.type === "free" ? 2.4 : 2}" ${
+      dash ? `stroke-dasharray="${dash}"` : ""
     } />`;
+    if (edge.label) {
+      svg += `<text x="${route.mid.x - bounds.x}" y="${route.mid.y - bounds.y - 8}" class="edge-label" text-anchor="middle" dominant-baseline="middle" font-family="Avenir Next, Segoe UI, sans-serif" font-size="12" fill="#2a3140">${escapeXml(edge.label)}</text>`;
+    }
+    addPathSegments(route.points, occupied);
   }
 
   for (const node of state.graph.nodes) {
@@ -927,6 +1437,9 @@ function renderNodes() {
     if (node.id === state.selectedNodeId) {
       element.classList.add("selected");
     }
+    if (state.linkDraft && state.linkDraft.sourceId === node.id) {
+      element.classList.add("linking-source");
+    }
     fragment.appendChild(nodeFragment);
   }
 
@@ -942,28 +1455,43 @@ function renderEdges() {
   els.nodes.style.height = `${mapSize.height}px`;
 
   const fragment = document.createDocumentFragment();
+  const occupied = [];
+  const routeCache = new Map();
   for (const edge of state.graph.edges) {
-    const source = getNode(edge.source);
-    const target = getNode(edge.target);
-    if (!source || !target) continue;
+    const route = computeEdgeRoute(edge, occupied);
+    if (!route) continue;
+    routeCache.set(edge.id, route);
 
-    const x1 = source.x + core.NODE_WIDTH / 2;
-    const y1 = source.y + core.NODE_HEIGHT / 2;
-    const x2 = target.x + core.NODE_WIDTH / 2;
-    const y2 = target.y + core.NODE_HEIGHT / 2;
-    const cx = (x1 + x2) / 2;
+    const hitPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    hitPath.setAttribute("d", edgePathDataForShape(route.points, getEdgeShape(edge)));
+    hitPath.setAttribute("fill", "none");
+    hitPath.setAttribute("class", "edge-hit");
+    hitPath.dataset.edgeId = edge.id;
+    fragment.appendChild(hitPath);
 
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", `M ${x1} ${y1} C ${cx} ${y1}, ${cx} ${y2}, ${x2} ${y2}`);
+    path.setAttribute("d", edgePathDataForShape(route.points, getEdgeShape(edge)));
     path.setAttribute("fill", "none");
-    path.setAttribute("stroke", edge.type === "free" ? "#e15d44" : "#6d86b8");
+    path.setAttribute("stroke", getEdgeColor(edge));
     path.setAttribute("stroke-width", edge.id === state.selectedEdgeId ? "3.5" : edge.type === "free" ? "2.3" : "2");
-    path.setAttribute("stroke-dasharray", edge.type === "free" ? "6 5" : "0");
+    path.setAttribute("stroke-dasharray", getEdgeDashArray(edge));
     path.setAttribute("class", `edge-path ${edge.id === state.selectedEdgeId ? "selected" : ""}`.trim());
     path.dataset.edgeId = edge.id;
     fragment.appendChild(path);
+
+    if (edge.label) {
+      const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      label.setAttribute("x", String(route.mid.x));
+      label.setAttribute("y", String(route.mid.y - 8));
+      label.setAttribute("class", "edge-label");
+      label.dataset.edgeId = edge.id;
+      label.textContent = edge.label;
+      fragment.appendChild(label);
+    }
+    addPathSegments(route.points, occupied);
   }
 
+  state.edgeRouteCache = routeCache;
   els.edges.replaceChildren(fragment);
 }
 
@@ -982,14 +1510,13 @@ function renderControls() {
     els.radiusInput.value = "14";
   }
 
-  els.linkModeBtn.setAttribute("aria-pressed", state.linkMode ? "true" : "false");
-  els.linkModeBtn.classList.toggle("is-active", state.linkMode);
-  els.linkModeBtn.title = state.linkMode ? "Mode lien activé" : "Mode lien désactivé";
   els.undoBtn.disabled = !history.canUndo();
   els.redoBtn.disabled = !history.canRedo();
   els.addChildBtn.disabled = !nodeSelected;
   els.deleteEdgeBtn.disabled = !edgeSelected;
-  els.edgeTypeSelect.disabled = !edgeSelected;
+  els.edgeTitleInput.disabled = !edgeSelected;
+  els.edgeColorInput.disabled = !edgeSelected;
+  els.edgeStyleSelect.disabled = !edgeSelected;
   els.deleteBtn.disabled = !nodeSelected && !edgeSelected;
   els.titleInput.disabled = !nodeSelected;
   els.textColorInput.disabled = !nodeSelected;
@@ -998,13 +1525,19 @@ function renderControls() {
   els.borderWidthInput.disabled = !nodeSelected;
   els.radiusInput.disabled = !nodeSelected;
 
-  if (edgeSelected) {
-    const edge = getEdge(state.selectedEdgeId);
-    if (edge) els.edgeTypeSelect.value = edge.type;
+  if (els.edgeShapeGlobalSelect) {
+    els.edgeShapeGlobalSelect.value = normalizeEdgeShape(state.defaultEdgeShape);
   }
 
   els.undoBtn.title = `Annuler (${snapshot.undo})`;
   els.redoBtn.title = `Rétablir (${snapshot.redo})`;
+  const currentLayout = state.preferredLayout || "horizontal";
+  els.layoutHorizontalBtn.classList.toggle("is-active", currentLayout === "horizontal");
+  els.layoutVerticalBtn.classList.toggle("is-active", currentLayout === "vertical");
+  els.layoutRadialBtn.classList.toggle("is-active", currentLayout === "radial");
+  els.layoutHorizontalBtn.setAttribute("aria-pressed", currentLayout === "horizontal" ? "true" : "false");
+  els.layoutVerticalBtn.setAttribute("aria-pressed", currentLayout === "vertical" ? "true" : "false");
+  els.layoutRadialBtn.setAttribute("aria-pressed", currentLayout === "radial" ? "true" : "false");
   if (els.emptyState) {
     els.emptyState.hidden = hasNodes;
   }
@@ -1028,6 +1561,26 @@ function renderQuickActions() {
   els.quickActions.style.top = `${y}px`;
 }
 
+function renderEdgeQuickActions() {
+  const edge = state.selectedEdgeId ? getEdge(state.selectedEdgeId) : null;
+  const show = Boolean(edge) && !state.selectedNodeId;
+  els.edgeQuickActions.hidden = !show;
+  if (!show) return;
+  const route = state.edgeRouteCache.get(edge.id) || computeOrderedRouteForEdge(edge.id);
+  if (!route) return;
+  const midX = route.mid.x;
+  const midY = route.mid.y;
+  const mapSize = computeMapSize();
+  const menuWidth = 280;
+  let x = midX - menuWidth / 2;
+  let y = midY + 14;
+  if (x < 10) x = 10;
+  if (x + menuWidth > mapSize.width - 10) x = mapSize.width - menuWidth - 10;
+  if (y < 10) y = 10;
+  els.edgeQuickActions.style.left = `${x}px`;
+  els.edgeQuickActions.style.top = `${y}px`;
+}
+
 function renderViewport() {
   els.stage.style.transform = `translate(${state.viewport.x}px, ${state.viewport.y}px) scale(${state.viewport.zoom})`;
 }
@@ -1037,12 +1590,14 @@ function render() {
   renderNodes();
   renderControls();
   renderQuickActions();
+  renderEdgeQuickActions();
   renderViewport();
 }
 
 function onNodePointerDown(event) {
   const nodeEl = event.target.closest(".node");
   if (!nodeEl) return;
+  if (event.target.closest(".node-handle")) return;
   if (event.target.closest("[data-inline-editor='true']")) return;
   if (state.spacePressed) return;
   event.preventDefault();
@@ -1125,10 +1680,18 @@ function cancelInlineEdit() {
 }
 
 function onCanvasPointerDown(event) {
+  const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+  const inNodeQuickActions = path.includes(els.quickActions);
+  const inEdgeQuickActions = path.includes(els.edgeQuickActions);
   const hitNode = event.target.closest(".node");
-  const hitEdge = event.target.closest(".edge-path");
-  const hitQuickActions = event.target.closest(".node-quick-actions");
-  if ((hitNode || hitEdge || hitQuickActions) && !state.spacePressed) return;
+  const hitEdge = event.target.closest(".edge-hit, .edge-path, .edge-label");
+  const hitQuickActions = inNodeQuickActions || event.target.closest(".node-quick-actions");
+  const hitEdgeQuickActions = inEdgeQuickActions || event.target.closest(".edge-quick-actions");
+  if (state.linkDraft && !hitNode) {
+    finishLinkDraft(null);
+    return;
+  }
+  if ((hitNode || hitEdge || hitQuickActions || hitEdgeQuickActions) && !state.spacePressed) return;
   if (!state.spacePressed) {
     clearSelection();
   }
@@ -1178,6 +1741,12 @@ function onKeyDown(event) {
   const activeTag = document.activeElement ? document.activeElement.tagName : "";
   const inInput = ["INPUT", "TEXTAREA", "SELECT"].includes(activeTag);
 
+  if (event.key === "Escape" && isExportModalOpen()) {
+    event.preventDefault();
+    closeExportModal();
+    return;
+  }
+
   if (event.code === "Space" && !inInput) {
     state.spacePressed = true;
     return;
@@ -1212,6 +1781,10 @@ function onKeyDown(event) {
     cancelInlineEdit();
     return;
   }
+  if (event.key === "Escape" && state.linkDraft) {
+    finishLinkDraft(null);
+    return;
+  }
 
   if (event.key === "Delete" || event.key === "Backspace") {
     event.preventDefault();
@@ -1244,6 +1817,7 @@ function onKeyUp(event) {
 }
 
 function boot() {
+  closeExportModal();
   const raw = localStorage.getItem(STORAGE_KEY);
   let loaded = false;
 
@@ -1261,10 +1835,6 @@ function boot() {
   }
 
   if (!loaded) {
-    loaded = loadLatestSnapshotFallback();
-  }
-
-  if (!loaded) {
     state.graph = {
       nodes: [{ id: "1", x: 180, y: 140, title: "Projet", color: "#ffd166", parentId: null }],
       edges: [],
@@ -1273,9 +1843,9 @@ function boot() {
   }
 
   state.lastSavedHash = graphHash();
-  state.lastSnapshotAt = Date.now();
-  state.selectedNodeId = state.graph.nodes[0] ? state.graph.nodes[0].id : null;
-  renderSnapshotList();
+  state.defaultEdgeShape = deriveDefaultEdgeShapeFromGraph();
+  state.selectedNodeId = null;
+  state.selectedEdgeId = null;
   requestRender();
 }
 
@@ -1283,6 +1853,10 @@ els.nodes.addEventListener("click", (event) => {
   const nodeEl = event.target.closest(".node");
   if (!nodeEl) return;
   event.stopPropagation();
+  if (state.linkDraft) {
+    finishLinkDraft(nodeEl.dataset.id);
+    return;
+  }
   onNodeClick(nodeEl.dataset.id);
 });
 
@@ -1319,13 +1893,34 @@ els.nodes.addEventListener("pointerdown", onNodePointerDown);
 els.nodes.addEventListener("pointermove", onNodePointerMove);
 els.nodes.addEventListener("pointerup", onNodePointerUp);
 els.nodes.addEventListener("pointercancel", onNodePointerUp);
-
-els.edges.addEventListener("click", (event) => {
-  const path = event.target.closest(".edge-path");
-  if (!path) return;
+els.nodes.addEventListener("pointerdown", (event) => {
+  const handle = event.target.closest(".node-handle");
+  if (!handle) return;
+  const nodeEl = handle.closest(".node");
+  if (!nodeEl) return;
+  event.preventDefault();
   event.stopPropagation();
-  selectEdge(path.dataset.edgeId);
+  if (!state.linkDraft) {
+    startLinkDraft(nodeEl.dataset.id);
+    return;
+  }
+  if (state.linkDraft.sourceId === nodeEl.dataset.id) {
+    finishLinkDraft(null);
+    return;
+  }
+  finishLinkDraft(nodeEl.dataset.id);
 });
+
+function selectEdgeFromEvent(event) {
+  const edgeEl = event.target.closest(".edge-hit, .edge-path, .edge-label");
+  if (!edgeEl || !edgeEl.dataset.edgeId) return;
+  event.preventDefault();
+  event.stopPropagation();
+  selectEdge(edgeEl.dataset.edgeId);
+}
+
+els.edges.addEventListener("pointerdown", selectEdgeFromEvent);
+els.edges.addEventListener("click", selectEdgeFromEvent);
 
 els.canvas.addEventListener("pointerdown", onCanvasPointerDown);
 els.canvas.addEventListener("pointermove", onCanvasPointerMove);
@@ -1346,7 +1941,6 @@ els.addChildBtn.addEventListener("click", () => {
   addChildToSelected();
 });
 
-els.linkModeBtn.addEventListener("click", toggleLinkMode);
 els.deleteBtn.addEventListener("click", deleteSelected);
 els.clearBtn.addEventListener("click", clearMap);
 els.deleteEdgeBtn.addEventListener("click", deleteSelectedEdge);
@@ -1405,27 +1999,56 @@ els.radiusInput.addEventListener("input", (event) => {
   }, "Rayon du nœud mis à jour");
 });
 
-els.edgeTypeSelect.addEventListener("change", (event) => {
+els.edgeTitleInput.addEventListener("input", (event) => {
   if (!state.selectedEdgeId) return;
-  const nextType = event.target.value === "tree" ? "tree" : "free";
+  const nextLabel = event.target.value.trim().slice(0, 80);
   commit(() => {
     const edge = getEdge(state.selectedEdgeId);
-    if (edge) edge.type = nextType;
-  }, "Type de lien mis à jour");
+    if (edge) edge.label = nextLabel;
+  }, "Titre du lien mis à jour");
 });
+
+els.edgeColorInput.addEventListener("input", (event) => {
+  if (!state.selectedEdgeId) return;
+  const nextColor = event.target.value;
+  commit(() => {
+    const edge = getEdge(state.selectedEdgeId);
+    if (edge) edge.color = nextColor;
+  }, "Couleur du lien mise à jour");
+});
+
+els.edgeStyleSelect.addEventListener("change", (event) => {
+  if (!state.selectedEdgeId) return;
+  const nextStyle = event.target.value === "dashed" || event.target.value === "dotted" ? event.target.value : "solid";
+  commit(() => {
+    const edge = getEdge(state.selectedEdgeId);
+    if (edge) edge.style = nextStyle;
+  }, "Style du lien mis à jour");
+});
+
+if (els.edgeShapeGlobalSelect) {
+  els.edgeShapeGlobalSelect.addEventListener("change", (event) => {
+    const nextShape = normalizeEdgeShape(event.target.value);
+    state.defaultEdgeShape = nextShape;
+    if (!state.graph.edges.length) {
+      requestRender();
+      return;
+    }
+    commit(() => {
+      for (const edge of state.graph.edges) {
+        edge.shape = nextShape;
+      }
+    }, "Forme globale des liens mise à jour");
+  });
+}
 
 els.layoutHorizontalBtn.addEventListener("click", () => runLayout("horizontal"));
 els.layoutVerticalBtn.addEventListener("click", () => runLayout("vertical"));
 els.layoutRadialBtn.addEventListener("click", () => runLayout("radial"));
-els.applyTemplateBtn.addEventListener("click", appliquerTemplateSelectionne);
 
-els.saveBtn.addEventListener("click", () => {
-  saveNow();
-  setStatus("Enregistré", false);
+els.openImportBtn.addEventListener("click", () => {
+  els.importJsonInput.click();
 });
-
-els.loadBtn.addEventListener("click", loadNow);
-els.exportJsonBtn.addEventListener("click", exportJson);
 
 els.importJsonInput.addEventListener("change", (event) => {
   const file = event.target.files && event.target.files[0];
@@ -1433,40 +2056,18 @@ els.importJsonInput.addEventListener("change", (event) => {
   event.target.value = "";
 });
 
-if (els.snapshotsList) {
-  els.snapshotsList.addEventListener("click", (event) => {
-    const button = event.target.closest("button[data-action]");
-    if (!button) return;
-    const index = Number(button.dataset.index);
-    if (!Number.isInteger(index)) return;
-    if (button.dataset.action === "restore-snapshot") {
-      restoreSnapshotAt(index);
-    } else if (button.dataset.action === "delete-snapshot") {
-      deleteSnapshotAt(index);
-    }
-  });
-}
-
-if (els.refreshSnapshotsBtn) {
-  els.refreshSnapshotsBtn.addEventListener("click", renderSnapshotList);
-}
-if (els.clearSnapshotsBtn) {
-  els.clearSnapshotsBtn.addEventListener("click", clearAllSnapshots);
-}
-
-els.exportSvgBtn.addEventListener("click", exportSvg);
-els.exportPngBtn.addEventListener("click", exportPng);
+els.openExportModalBtn.addEventListener("click", openExportModal);
+els.closeExportModalBtn.addEventListener("click", closeExportModal);
+els.runExportJsonBtn.addEventListener("click", runExportJsonFromModal);
+els.runExportBtn.addEventListener("click", runExportFromModal);
+els.exportModal.addEventListener("click", (event) => {
+  if (event.target === els.exportModal) {
+    closeExportModal();
+  }
+});
 
 els.qaAddChildBtn.addEventListener("click", () => {
   addChildToSelected();
-});
-
-els.qaLinkBtn.addEventListener("click", () => {
-  if (!state.linkMode) {
-    toggleLinkMode();
-  }
-  state.linkingFrom = state.selectedNodeId;
-  setStatus("Nœud source choisi, cliquez une cible", false);
 });
 
 els.qaRenameBtn.addEventListener("click", () => {
@@ -1487,9 +2088,6 @@ els.quickActions.addEventListener("click", (event) => {
 
 if (els.emptyCreateBtn) {
   els.emptyCreateBtn.addEventListener("click", createRootAtCenter);
-}
-if (els.emptyTemplateBtn) {
-  els.emptyTemplateBtn.addEventListener("click", appliquerTemplateSelectionne);
 }
 
 window.setInterval(runAutosave, AUTOSAVE_INTERVAL_MS);
