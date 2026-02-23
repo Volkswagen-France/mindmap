@@ -4,20 +4,27 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Atelier de cartes</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
+    <div id="password-gate" class="password-gate" hidden>
+      <section class="password-card" role="dialog" aria-modal="true" aria-labelledby="password-gate-title">
+        <h1 id="password-gate-title">Accès protégé</h1>
+        <p>Entre le mot de passe pour ouvrir le projet.</p>
+        <label for="password-gate-input">Mot de passe</label>
+        <input id="password-gate-input" type="password" autocomplete="current-password" />
+        <p id="password-gate-error" class="password-gate-error" aria-live="polite"></p>
+        <button id="password-gate-submit" class="btn btn-primary btn-inline" type="button">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>
+          <span>Déverrouiller</span>
+        </button>
+      </section>
+    </div>
+
     <header class="topbar" aria-label="Barre de contrôle sticky">
       <div class="toolbar-row">
         <div class="group actions-main" role="toolbar" aria-label="Actions principales">
-          <button id="undo-btn" class="btn btn-inline" title="Annuler (Ctrl/Cmd+Z)" aria-label="Annuler">
-            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 8H4v5"/><path d="M4 13a8 8 0 1 0 2.3-5.7L4 9"/></svg>
-            <span>Annuler</span>
-          </button>
-          <button id="redo-btn" class="btn btn-inline" title="Rétablir (Ctrl/Cmd+Shift+Z)" aria-label="Rétablir">
-            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 8h5v5"/><path d="M20 13a8 8 0 1 1-2.3-5.7L20 9"/></svg>
-            <span>Rétablir</span>
-          </button>
           <button id="add-root-btn" class="btn btn-primary btn-inline" title="Ajouter une racine (N)" aria-label="Ajouter une racine">
             <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
             <span>Racine</span>
@@ -25,6 +32,10 @@
           <button id="add-child-btn" class="btn btn-primary btn-inline" title="Ajouter un enfant (Tab)" aria-label="Ajouter un enfant">
             <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6v12M8 12h9"/><path d="m14 8 3 4-3 4"/></svg>
             <span>Enfant</span>
+          </button>
+          <button id="add-postit-btn" class="btn btn-inline" title="Ajouter un post-it (P)" aria-label="Ajouter un post-it">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5z"/><path d="M14 20v-5h5"/></svg>
+            <span>Post-it</span>
           </button>
           <button id="delete-btn" class="btn btn-danger btn-inline" title="Supprimer la sélection (Suppr)" aria-label="Supprimer">
             <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M8 7l1 12h6l1-12"/></svg>
@@ -34,14 +45,27 @@
             <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4l16 16"/><path d="M7 7h12l-2 12H9L7 7z"/></svg>
             <span>Vider</span>
           </button>
+          <button id="undo-btn" class="btn btn-inline" title="Annuler (Ctrl/Cmd+Z)" aria-label="Annuler">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 8H4v5"/><path d="M4 13a8 8 0 1 0 2.3-5.7L4 9"/></svg>
+            <span>Annuler</span>
+          </button>
+          <button id="redo-btn" class="btn btn-inline" title="Rétablir (Ctrl/Cmd+Shift+Z)" aria-label="Rétablir">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 8h5v5"/><path d="M20 13a8 8 0 1 1-2.3-5.7L20 9"/></svg>
+            <span>Rétablir</span>
+          </button>
         </div>
-        <div class="group compact" role="group" aria-label="Style global des liens">
-          <label for="edge-shape-global">Traits</label>
-          <select id="edge-shape-global" aria-label="Forme globale des liens">
-            <option value="geometrique">Géométrique</option>
-            <option value="arrondi">Arrondi</option>
-            <option value="courbe">Courbe</option>
-          </select>
+        <div class="group compact header-projects" role="group" aria-label="Projets">
+          <select id="project-select" aria-label="Projet actif"></select>
+          <button id="project-new-btn" class="btn btn-inline" type="button" aria-label="Nouveau projet">
+            <span>Nouveau projet</span>
+          </button>
+          <button id="project-rename-btn" class="btn btn-inline" type="button" aria-label="Renommer le projet">
+            <span>Renommer</span>
+          </button>
+          <button id="project-delete-btn" class="btn btn-danger btn-inline" type="button" aria-label="Supprimer le projet">
+            <span>Suppr.</span>
+          </button>
+          <div id="presence-bar" class="presence-bar" aria-live="polite" title="Présence temps réel">Solo</div>
         </div>
       </div>
     </header>
@@ -54,10 +78,6 @@
               <button id="qa-add-child" title="Ajouter un enfant" aria-label="Ajouter un enfant">
                 <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6v12M8 12h9"/><path d="m14 8 3 4-3 4"/></svg>
                 <span>Enfant</span>
-              </button>
-              <button id="qa-rename" title="Renommer" aria-label="Renommer">
-                <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l10-10-4-4L4 16v4z"/><path d="m12 6 4 4"/></svg>
-                <span>Renommer</span>
               </button>
               <button id="qa-delete" title="Supprimer" aria-label="Supprimer">
                 <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M8 7l1 12h6l1-12"/></svg>
@@ -74,6 +94,14 @@
               </div>
               <label>Titre
                 <input id="node-title" type="text" placeholder="Nœud" />
+              </label>
+              <div class="text-tools" role="group" aria-label="Style du titre du nœud">
+                <button id="node-title-center-btn" type="button" class="btn btn-inline" title="Centrer le titre">Centrer</button>
+                <button id="node-title-bold-btn" type="button" class="btn btn-inline" title="Mettre en gras">Gras</button>
+                <button id="node-title-italic-btn" type="button" class="btn btn-inline" title="Mettre en italique">Italique</button>
+              </div>
+              <label>Lien du titre
+                <input id="node-title-link" type="text" placeholder="https://..." />
               </label>
               <div class="node-quick-colors">
                 <label>Texte
@@ -97,8 +125,29 @@
             </div>
           </div>
           <div id="edge-quick-actions" class="edge-quick-actions" hidden>
+            <div class="edge-quick-top">
+              <button id="delete-edge-btn" class="btn btn-inline" type="button">
+                <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M8 7l1 12h6l1-12"/></svg>
+                <span>Suppr.</span>
+              </button>
+            </div>
+            <div class="edge-quick-presets" aria-label="Presets de lien">
+              <button type="button" class="preset edge-preset" data-edge-preset="net" title="Net"></button>
+              <button type="button" class="preset edge-preset" data-edge-preset="signal" title="Signal"></button>
+              <button type="button" class="preset edge-preset" data-edge-preset="flux" title="Flux"></button>
+              <button type="button" class="preset edge-preset" data-edge-preset="organique" title="Organique"></button>
+              <button type="button" class="preset edge-preset" data-edge-preset="discret" title="Discret"></button>
+            </div>
             <label>Titre du lien
               <input id="edge-title" type="text" placeholder="Lien" />
+            </label>
+            <div class="text-tools" role="group" aria-label="Style du titre du lien">
+              <button id="edge-title-center-btn" type="button" class="btn btn-inline" title="Centrer le titre">Centrer</button>
+              <button id="edge-title-bold-btn" type="button" class="btn btn-inline" title="Mettre en gras">Gras</button>
+              <button id="edge-title-italic-btn" type="button" class="btn btn-inline" title="Mettre en italique">Italique</button>
+            </div>
+            <label>Lien du titre
+              <input id="edge-title-link" type="text" placeholder="https://..." />
             </label>
             <div class="edge-quick-row">
               <label>Couleur
@@ -111,12 +160,6 @@
                   <option value="dotted">Pointillé</option>
                 </select>
               </label>
-            </div>
-            <div class="edge-quick-row">
-              <button id="delete-edge-btn" class="btn btn-danger btn-inline" type="button">
-                <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M8 7l1 12h6l1-12"/></svg>
-                <span>Suppr. lien</span>
-              </button>
             </div>
           </div>
           <svg id="edges" class="edges"></svg>
@@ -147,19 +190,36 @@
       <input id="import-json-input" type="file" accept="application/json" hidden />
     </div>
 
-    <div class="fab-layout" role="group" aria-label="Disposition">
-      <button id="layout-horizontal-btn" class="btn btn-inline" type="button" title="Disposition horizontale">
-        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h18M3 12h18M3 17h18"/></svg>
-        <span>Horiz.</span>
-      </button>
-      <button id="layout-vertical-btn" class="btn btn-inline" type="button" title="Disposition verticale">
-        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3v18M12 3v18M17 3v18"/></svg>
-        <span>Vert.</span>
-      </button>
-      <button id="layout-radial-btn" class="btn btn-inline" type="button" title="Disposition radiale">
-        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12m-2.5 0a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0"/><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8"/></svg>
-        <span>Radiale</span>
-      </button>
+    <div class="fab-left-cluster">
+      <div class="fab-layout" role="group" aria-label="Disposition">
+        <button id="layout-horizontal-btn" class="btn btn-inline" type="button" title="Disposition horizontale">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h18M3 12h18M3 17h18"/></svg>
+          <span>Horiz.</span>
+        </button>
+        <button id="layout-vertical-btn" class="btn btn-inline" type="button" title="Disposition verticale">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3v18M12 3v18M17 3v18"/></svg>
+          <span>Vert.</span>
+        </button>
+        <button id="layout-radial-btn" class="btn btn-inline" type="button" title="Disposition radiale">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12m-2.5 0a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0"/><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8"/></svg>
+          <span>Radiale</span>
+        </button>
+      </div>
+
+      <div class="fab-shape" role="group" aria-label="Style des traits">
+        <button id="edge-shape-geo-btn" class="btn btn-inline" type="button" aria-label="Trait géométrique">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h16"/><path d="M8 7v10M16 7v10"/></svg>
+          <span>Géo</span>
+        </button>
+        <button id="edge-shape-round-btn" class="btn btn-inline" type="button" aria-label="Trait arrondi">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 15c4 0 4-6 8-6s4 6 8 6"/></svg>
+          <span>Arr.</span>
+        </button>
+        <button id="edge-shape-curve-btn" class="btn btn-inline" type="button" aria-label="Trait courbe">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16C9 6 15 6 20 16"/></svg>
+          <span>Courbe</span>
+        </button>
+      </div>
     </div>
 
     <div id="export-modal" class="modal-backdrop" hidden>
@@ -193,7 +253,7 @@
             <select id="export-format">
               <option value="png" selected>PNG</option>
               <option value="svg">SVG</option>
-              <option value="json">JSON</option>
+              <option value="pdf">PDF</option>
             </select>
           </label>
           <label class="check-inline"><input id="export-transparent" type="checkbox" />Fond transparent</label>
@@ -214,11 +274,23 @@
     <template id="node-template">
       <div class="node" tabindex="0">
         <span class="node-title"></span>
-        <button class="node-handle" type="button" aria-label="Créer un lien"></button>
+        <button class="node-handle node-handle-top" type="button" aria-label="Créer un lien"></button>
+        <button class="node-handle node-handle-right" type="button" aria-label="Créer un lien"></button>
+        <button class="node-handle node-handle-bottom" type="button" aria-label="Créer un lien"></button>
+        <button class="node-handle node-handle-left" type="button" aria-label="Créer un lien"></button>
       </div>
     </template>
 
     <script src="core.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script>
+      window.APP_CONFIG = {
+        supabaseUrl: "https://bdacwxwfsbmgskhhbrwp.supabase.co",
+        supabaseAnonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJkYWN3eHdmc2JtZ3NraGhicndwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE4MzY2NjQsImV4cCI6MjA4NzQxMjY2NH0.rcylCRmyEcoIMh4lbCYVs0He5bOf92-3Uf-Q48zUqlQ",
+        workspaceId: "volkswagen-france",
+        appPassword: "9Zmrg5zowwLnQYhe",
+      };
+    </script>
     <script src="script.js"></script>
   </body>
 </html>

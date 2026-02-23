@@ -1,7 +1,14 @@
 const core = window.MindMapCore;
 
 const STORAGE_KEY = "mindmap-data-v2";
+const ACTIVE_PROJECT_KEY = "mindmap-active-project-id";
+const PROJECTS_DB_NAME = "mindmap-projects-db";
+const PROJECTS_DB_VERSION = 1;
+const PROJECTS_STORE = "projects";
+const CLOUD_SYNC_INTERVAL_MS = 20000;
 const AUTOSAVE_INTERVAL_MS = 12000;
+const COLLAB_IDENTITY_KEY = "mindmap-collab-identity";
+const PASSWORD_UNLOCK_SESSION_KEY = "mindmap-password-unlocked";
 const SNAP_THRESHOLD = 18;
 const ROUTE_NODE_PADDING = 16;
 const ROUTE_STUB = 24;
@@ -11,6 +18,7 @@ const EDGE_OVERLAP_PENALTY = 10;
 const EDGE_CROSS_PENALTY = 140;
 const EDGE_TURN_PENALTY = 18;
 const EDGE_SHORT_SEGMENT_PENALTY = 12;
+const NODE_DRAG_START_PX = 7;
 
 const state = {
   graph: {
@@ -23,28 +31,69 @@ const state = {
   linkMode: false,
   linkingFrom: null,
   linkDraft: null,
+  linkDraftCursor: null,
   viewport: {
     x: 80,
     y: 80,
     zoom: 1,
   },
   draggingNodeId: null,
+  dragActivated: false,
+  dragStartClient: null,
   dragOffset: { x: 0, y: 0 },
+  resizingPostitId: null,
+  resizePostitStartClient: null,
+  resizePostitStartSize: null,
   isPanning: false,
   panStart: null,
   spacePressed: false,
   renderQueued: false,
   inlineEditNodeId: null,
+  inlineEditIsPostit: false,
   lastAutosaveAt: null,
   lastSavedHash: "",
   preferredLayout: "horizontal",
   defaultEdgeShape: "arrondi",
+  defaultEdgeStyle: "dashed",
+  defaultEdgeColor: "#e15d44",
+  activeTraitPreset: "signal",
   edgeRouteCache: new Map(),
+  currentProjectId: null,
+  currentProjectName: "",
+  projects: [],
+  projectDbPromise: null,
+  cloudSyncEnabled: false,
+  cloudSyncWorkspace: "equipe-principale",
+  realtime: {
+    enabled: false,
+    client: null,
+    channel: null,
+    connected: false,
+    applyingRemote: false,
+    suppressBroadcast: false,
+    clientId: "",
+    clientName: "",
+    peers: new Map(),
+    clock: 1,
+    seq: 0,
+    seenActions: new Map(),
+    nodeVersions: new Map(),
+    edgeVersions: new Map(),
+    nodeTombstones: new Map(),
+    edgeTombstones: new Map(),
+    lastRemoteAt: 0,
+    lastSnapshotAt: 0,
+  },
+  appLocked: false,
 };
 
 const history = core.createHistory(250);
 
 const els = {
+  passwordGate: document.getElementById("password-gate"),
+  passwordGateInput: document.getElementById("password-gate-input"),
+  passwordGateSubmit: document.getElementById("password-gate-submit"),
+  passwordGateError: document.getElementById("password-gate-error"),
   canvas: document.getElementById("canvas"),
   stage: document.getElementById("stage"),
   edges: document.getElementById("edges"),
@@ -54,9 +103,14 @@ const els = {
   redoBtn: document.getElementById("redo-btn"),
   addRootBtn: document.getElementById("add-root-btn"),
   addChildBtn: document.getElementById("add-child-btn"),
+  addPostitBtn: document.getElementById("add-postit-btn"),
   deleteBtn: document.getElementById("delete-btn"),
   clearBtn: document.getElementById("clear-btn"),
   titleInput: document.getElementById("node-title"),
+  nodeTitleCenterBtn: document.getElementById("node-title-center-btn"),
+  nodeTitleBoldBtn: document.getElementById("node-title-bold-btn"),
+  nodeTitleItalicBtn: document.getElementById("node-title-italic-btn"),
+  nodeTitleLinkInput: document.getElementById("node-title-link"),
   textColorInput: document.getElementById("node-text-color"),
   colorInput: document.getElementById("node-color"),
   borderColorInput: document.getElementById("node-border-color"),
@@ -64,9 +118,16 @@ const els = {
   radiusInput: document.getElementById("node-radius"),
   edgeQuickActions: document.getElementById("edge-quick-actions"),
   edgeTitleInput: document.getElementById("edge-title"),
+  edgeTitleCenterBtn: document.getElementById("edge-title-center-btn"),
+  edgeTitleBoldBtn: document.getElementById("edge-title-bold-btn"),
+  edgeTitleItalicBtn: document.getElementById("edge-title-italic-btn"),
+  edgeTitleLinkInput: document.getElementById("edge-title-link"),
   edgeColorInput: document.getElementById("edge-color"),
   edgeStyleSelect: document.getElementById("edge-style"),
-  edgeShapeGlobalSelect: document.getElementById("edge-shape-global"),
+  edgeQuickActionsEl: document.getElementById("edge-quick-actions"),
+  edgeShapeGeoBtn: document.getElementById("edge-shape-geo-btn"),
+  edgeShapeRoundBtn: document.getElementById("edge-shape-round-btn"),
+  edgeShapeCurveBtn: document.getElementById("edge-shape-curve-btn"),
   deleteEdgeBtn: document.getElementById("delete-edge-btn"),
   layoutHorizontalBtn: document.getElementById("layout-horizontal-btn"),
   layoutVerticalBtn: document.getElementById("layout-vertical-btn"),
@@ -85,14 +146,854 @@ const els = {
   runExportBtn: document.getElementById("run-export-btn"),
   quickActions: document.getElementById("node-quick-actions"),
   qaAddChildBtn: document.getElementById("qa-add-child"),
-  qaRenameBtn: document.getElementById("qa-rename"),
   qaDeleteBtn: document.getElementById("qa-delete"),
   emptyState: document.getElementById("empty-state"),
   emptyCreateBtn: document.getElementById("empty-create-btn"),
+  projectSelect: document.getElementById("project-select"),
+  projectNewBtn: document.getElementById("project-new-btn"),
+  projectRenameBtn: document.getElementById("project-rename-btn"),
+  projectDeleteBtn: document.getElementById("project-delete-btn"),
+  presenceBar: document.getElementById("presence-bar"),
 };
+
+function appPassword() {
+  const cfg = window.APP_CONFIG || {};
+  return String(cfg.appPassword || "").trim();
+}
+
+function passwordSessionFingerprint(password) {
+  return `${window.location.host}::${password}`;
+}
+
+function isPasswordUnlocked(password) {
+  if (!password) return true;
+  try {
+    return sessionStorage.getItem(PASSWORD_UNLOCK_SESSION_KEY) === passwordSessionFingerprint(password);
+  } catch {
+    return false;
+  }
+}
+
+function rememberPasswordUnlocked(password) {
+  if (!password) return;
+  try {
+    sessionStorage.setItem(PASSWORD_UNLOCK_SESSION_KEY, passwordSessionFingerprint(password));
+  } catch {
+  }
+}
+
+function showPasswordGate() {
+  state.appLocked = true;
+  document.body.classList.add("app-locked");
+  if (els.passwordGate) els.passwordGate.hidden = false;
+  if (els.passwordGateInput) {
+    els.passwordGateInput.value = "";
+    window.setTimeout(() => {
+      els.passwordGateInput.focus();
+      els.passwordGateInput.select();
+    }, 0);
+  }
+  if (els.passwordGateError) els.passwordGateError.textContent = "";
+}
+
+function hidePasswordGate() {
+  state.appLocked = false;
+  document.body.classList.remove("app-locked");
+  if (els.passwordGate) els.passwordGate.hidden = true;
+  if (els.passwordGateError) els.passwordGateError.textContent = "";
+}
+
+function ensurePasswordGate(onUnlocked) {
+  const required = appPassword();
+  if (!required || isPasswordUnlocked(required)) {
+    hidePasswordGate();
+    onUnlocked();
+    return;
+  }
+  showPasswordGate();
+  const tryUnlock = () => {
+    const provided = (els.passwordGateInput && els.passwordGateInput.value) ? els.passwordGateInput.value : "";
+    if (provided === required) {
+      rememberPasswordUnlocked(required);
+      hidePasswordGate();
+      onUnlocked();
+      return;
+    }
+    if (els.passwordGateError) {
+      els.passwordGateError.textContent = "Mot de passe incorrect.";
+    }
+    if (els.passwordGateInput) {
+      els.passwordGateInput.focus();
+      els.passwordGateInput.select();
+    }
+  };
+  if (els.passwordGateSubmit) {
+    els.passwordGateSubmit.onclick = tryUnlock;
+  }
+  if (els.passwordGateInput) {
+    els.passwordGateInput.onkeydown = (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        tryUnlock();
+      }
+    };
+  }
+}
 
 function graphHash() {
   return JSON.stringify(state.graph);
+}
+
+function cloudConfig() {
+  const cfg = window.APP_CONFIG || {};
+  const url = String(cfg.supabaseUrl || "").trim().replace(/\/+$/, "");
+  const anonKey = String(cfg.supabaseAnonKey || "").trim();
+  const workspace = String(cfg.workspaceId || "equipe-principale").trim() || "equipe-principale";
+  const enabled = Boolean(url && anonKey);
+  return { enabled, url, anonKey, workspace };
+}
+
+function cloudHeaders() {
+  const cfg = cloudConfig();
+  return {
+    apikey: cfg.anonKey,
+    Authorization: `Bearer ${cfg.anonKey}`,
+    "Content-Type": "application/json",
+  };
+}
+
+function randomCollaboratorName() {
+  const seeds = ["Atlas", "Nova", "Pixel", "Aube", "Iris", "Lynx", "Nexus", "Orion"];
+  const suffix = Math.floor(100 + Math.random() * 900);
+  return `${seeds[Math.floor(Math.random() * seeds.length)]} ${suffix}`;
+}
+
+function ensureCollaboratorIdentity() {
+  try {
+    const raw = localStorage.getItem(COLLAB_IDENTITY_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.id === "string" && typeof parsed.name === "string") {
+        return { id: parsed.id, name: parsed.name };
+      }
+    }
+  } catch {
+  }
+  const identity = {
+    id: (window.crypto && typeof window.crypto.randomUUID === "function")
+      ? window.crypto.randomUUID()
+      : `u-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+    name: randomCollaboratorName(),
+  };
+  try {
+    localStorage.setItem(COLLAB_IDENTITY_KEY, JSON.stringify(identity));
+  } catch {
+  }
+  return identity;
+}
+
+function updatePresenceBar() {
+  if (!els.presenceBar) return;
+  if (!state.realtime.enabled || !state.realtime.connected) {
+    els.presenceBar.textContent = "Solo";
+    els.presenceBar.title = "Mode local";
+    return;
+  }
+  const others = Array.from(state.realtime.peers.values());
+  const count = 1 + others.length;
+  els.presenceBar.textContent = count === 1 ? "Solo" : `${count} en ligne`;
+  const names = [state.realtime.clientName, ...others.map((peer) => peer.name)].filter(Boolean);
+  els.presenceBar.title = names.length ? `Connectés: ${names.join(", ")}` : "Présence temps réel";
+}
+
+function refreshPresenceFromChannel() {
+  const channel = state.realtime.channel;
+  if (!channel || typeof channel.presenceState !== "function") return;
+  const presence = channel.presenceState();
+  const peers = new Map();
+  for (const entries of Object.values(presence || {})) {
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object") continue;
+      const peerId = String(entry.clientId || "");
+      if (!peerId || peerId === state.realtime.clientId) continue;
+      peers.set(peerId, {
+        id: peerId,
+        name: String(entry.name || "Membre"),
+        selectedNodeId: typeof entry.selectedNodeId === "string" ? entry.selectedNodeId : null,
+      });
+    }
+  }
+  state.realtime.peers = peers;
+  updatePresenceBar();
+  requestRender();
+}
+
+function getLockOwner(nodeId) {
+  if (!nodeId) return null;
+  for (const peer of state.realtime.peers.values()) {
+    if (peer.selectedNodeId === nodeId) return peer;
+  }
+  return null;
+}
+
+function isNodeLockedByOther(nodeId) {
+  return Boolean(getLockOwner(nodeId));
+}
+
+function peerInitials(name) {
+  const parts = String(name || "").trim().split(/\s+/).slice(0, 2);
+  if (!parts.length) return "??";
+  return parts.map((part) => part.slice(0, 1).toUpperCase()).join("");
+}
+
+function versionCmp(a, b) {
+  const va = a && Number.isFinite(a.v) ? a.v : 0;
+  const vb = b && Number.isFinite(b.v) ? b.v : 0;
+  if (va !== vb) return va - vb;
+  const ba = a && typeof a.by === "string" ? a.by : "";
+  const bb = b && typeof b.by === "string" ? b.by : "";
+  if (ba === bb) return 0;
+  return ba > bb ? 1 : -1;
+}
+
+function maxVersion(a, b) {
+  return versionCmp(a, b) >= 0 ? a : b;
+}
+
+function nextRealtimeVersion() {
+  state.realtime.clock = Math.max(1, state.realtime.clock + 1);
+  return { v: state.realtime.clock, by: state.realtime.clientId };
+}
+
+function resetRealtimeVersionState(graph) {
+  state.realtime.nodeVersions = new Map();
+  state.realtime.edgeVersions = new Map();
+  state.realtime.nodeTombstones = new Map();
+  state.realtime.edgeTombstones = new Map();
+  state.realtime.clock = 1;
+  const base = { v: 1, by: state.realtime.clientId || "local" };
+  for (const node of (graph && graph.nodes) || []) {
+    state.realtime.nodeVersions.set(node.id, base);
+  }
+  for (const edge of (graph && graph.edges) || []) {
+    state.realtime.edgeVersions.set(edge.id, base);
+  }
+}
+
+function graphDiff(before, after) {
+  const nodeBefore = new Map(before.nodes.map((node) => [node.id, node]));
+  const nodeAfter = new Map(after.nodes.map((node) => [node.id, node]));
+  const edgeBefore = new Map(before.edges.map((edge) => [edge.id, edge]));
+  const edgeAfter = new Map(after.edges.map((edge) => [edge.id, edge]));
+
+  const nodeUpserts = [];
+  const nodeDeletes = [];
+  const edgeUpserts = [];
+  const edgeDeletes = [];
+
+  for (const [id, node] of nodeAfter.entries()) {
+    const prev = nodeBefore.get(id);
+    if (!prev || JSON.stringify(prev) !== JSON.stringify(node)) {
+      nodeUpserts.push(core.cloneGraph(node));
+    }
+  }
+  for (const id of nodeBefore.keys()) {
+    if (!nodeAfter.has(id)) nodeDeletes.push(id);
+  }
+  for (const [id, edge] of edgeAfter.entries()) {
+    const prev = edgeBefore.get(id);
+    if (!prev || JSON.stringify(prev) !== JSON.stringify(edge)) {
+      edgeUpserts.push(core.cloneGraph(edge));
+    }
+  }
+  for (const id of edgeBefore.keys()) {
+    if (!edgeAfter.has(id)) edgeDeletes.push(id);
+  }
+
+  return { nodeUpserts, nodeDeletes, edgeUpserts, edgeDeletes };
+}
+
+function createRealtimePatch(before, after) {
+  const diff = graphDiff(before, after);
+  const nodeUpserts = diff.nodeUpserts.map((node) => {
+    const version = nextRealtimeVersion();
+    state.realtime.nodeVersions.set(node.id, version);
+    state.realtime.nodeTombstones.delete(node.id);
+    return { node, version };
+  });
+  const nodeDeletes = diff.nodeDeletes.map((id) => {
+    const version = nextRealtimeVersion();
+    state.realtime.nodeTombstones.set(id, version);
+    state.realtime.nodeVersions.delete(id);
+    return { id, version };
+  });
+  const edgeUpserts = diff.edgeUpserts.map((edge) => {
+    const version = nextRealtimeVersion();
+    state.realtime.edgeVersions.set(edge.id, version);
+    state.realtime.edgeTombstones.delete(edge.id);
+    return { edge, version };
+  });
+  const edgeDeletes = diff.edgeDeletes.map((id) => {
+    const version = nextRealtimeVersion();
+    state.realtime.edgeTombstones.set(id, version);
+    state.realtime.edgeVersions.delete(id);
+    return { id, version };
+  });
+  return {
+    nodes: { upserts: nodeUpserts, deletes: nodeDeletes },
+    edges: { upserts: edgeUpserts, deletes: edgeDeletes },
+    nextId: after.nextId,
+    preferredLayout: state.preferredLayout || "horizontal",
+    defaultEdgeShape: normalizeEdgeShape(state.defaultEdgeShape),
+    maxClock: state.realtime.clock,
+  };
+}
+
+function pruneSeenActions() {
+  const now = Date.now();
+  for (const [id, ts] of state.realtime.seenActions.entries()) {
+    if (now - ts > 10 * 60 * 1000) {
+      state.realtime.seenActions.delete(id);
+    }
+  }
+}
+
+function hasSeenAction(actionId) {
+  if (!actionId) return false;
+  return state.realtime.seenActions.has(actionId);
+}
+
+function markSeenAction(actionId) {
+  if (!actionId) return;
+  state.realtime.seenActions.set(actionId, Date.now());
+  if (state.realtime.seenActions.size > 500) pruneSeenActions();
+}
+
+function trackRealtimePresence() {
+  if (!state.realtime.connected || !state.realtime.channel) return;
+  const payload = {
+    clientId: state.realtime.clientId,
+    name: state.realtime.clientName,
+    selectedNodeId: state.selectedNodeId || null,
+    projectId: state.currentProjectId || "",
+    ts: Date.now(),
+  };
+  state.realtime.channel.track(payload).catch(() => {});
+}
+
+function broadcastRealtimePatch(patch, reason = "update") {
+  if (!state.realtime.enabled || !state.realtime.connected || !state.realtime.channel) return;
+  if (state.realtime.applyingRemote || state.realtime.suppressBroadcast) return;
+  if (!patch) return;
+  const actionId = `${state.realtime.clientId}:${++state.realtime.seq}`;
+  markSeenAction(actionId);
+  const payload = {
+    actionId,
+    sourceId: state.realtime.clientId,
+    projectId: state.currentProjectId || "",
+    reason,
+    at: Date.now(),
+    patch,
+  };
+  state.realtime.channel.send({
+    type: "broadcast",
+    event: "graph-patch",
+    payload,
+  }).catch(() => {});
+}
+
+function applyRemoteSnapshot(payload) {
+  if (!payload || payload.projectId !== state.currentProjectId) return;
+  if (payload.sourceId === state.realtime.clientId) return;
+  if (!payload.graph) return;
+  const snapshotAt = Number(payload.at) || Date.now();
+  if (snapshotAt <= state.realtime.lastSnapshotAt) return;
+  const validated = core.validateAndNormalizeData(payload.graph);
+  if (!validated.ok) return;
+  state.realtime.lastSnapshotAt = snapshotAt;
+  state.realtime.applyingRemote = true;
+  history.clear();
+  state.graph = validated.data;
+  state.preferredLayout = payload.preferredLayout || state.preferredLayout || "horizontal";
+  state.defaultEdgeShape = normalizeEdgeShape(payload.defaultEdgeShape || deriveDefaultEdgeShapeFromGraph());
+  if (Number.isFinite(payload.maxClock)) {
+    state.realtime.clock = Math.max(state.realtime.clock, Number(payload.maxClock));
+  }
+  resetRealtimeVersionState(state.graph);
+  state.selectedEdgeId = null;
+  if (state.selectedNodeId && !getNode(state.selectedNodeId)) state.selectedNodeId = null;
+  saveNow();
+  requestRender();
+  setStatus("Synchronisation en direct reçue", false);
+  state.realtime.applyingRemote = false;
+}
+
+function applyRemotePatch(payload) {
+  if (!payload || payload.projectId !== state.currentProjectId) return;
+  if (payload.sourceId === state.realtime.clientId) return;
+  if (hasSeenAction(payload.actionId)) return;
+  markSeenAction(payload.actionId);
+
+  const patch = payload.patch;
+  if (!patch || typeof patch !== "object") return;
+  if (Number.isFinite(patch.maxClock)) {
+    state.realtime.clock = Math.max(state.realtime.clock, Number(patch.maxClock));
+  }
+
+  const next = core.cloneGraph(state.graph);
+  const nodeMap = new Map(next.nodes.map((node) => [node.id, node]));
+  const edgeMap = new Map(next.edges.map((edge) => [edge.id, edge]));
+
+  for (const item of (patch.nodes && patch.nodes.deletes) || []) {
+    const id = String(item && item.id ? item.id : "");
+    if (!id) continue;
+    const remoteVersion = item.version || { v: 0, by: "" };
+    const localVersion = maxVersion(state.realtime.nodeVersions.get(id), state.realtime.nodeTombstones.get(id));
+    if (versionCmp(remoteVersion, localVersion) <= 0) continue;
+    nodeMap.delete(id);
+    state.realtime.nodeVersions.delete(id);
+    state.realtime.nodeTombstones.set(id, remoteVersion);
+  }
+
+  for (const item of (patch.nodes && patch.nodes.upserts) || []) {
+    const node = item && item.node;
+    if (!node || !node.id) continue;
+    const id = String(node.id);
+    const remoteVersion = item.version || { v: 0, by: "" };
+    const localVersion = maxVersion(state.realtime.nodeVersions.get(id), state.realtime.nodeTombstones.get(id));
+    if (versionCmp(remoteVersion, localVersion) <= 0) continue;
+    nodeMap.set(id, core.cloneGraph(node));
+    state.realtime.nodeVersions.set(id, remoteVersion);
+    state.realtime.nodeTombstones.delete(id);
+  }
+
+  for (const item of (patch.edges && patch.edges.deletes) || []) {
+    const id = String(item && item.id ? item.id : "");
+    if (!id) continue;
+    const remoteVersion = item.version || { v: 0, by: "" };
+    const localVersion = maxVersion(state.realtime.edgeVersions.get(id), state.realtime.edgeTombstones.get(id));
+    if (versionCmp(remoteVersion, localVersion) <= 0) continue;
+    edgeMap.delete(id);
+    state.realtime.edgeVersions.delete(id);
+    state.realtime.edgeTombstones.set(id, remoteVersion);
+  }
+
+  for (const item of (patch.edges && patch.edges.upserts) || []) {
+    const edge = item && item.edge;
+    if (!edge || !edge.id) continue;
+    const id = String(edge.id);
+    const remoteVersion = item.version || { v: 0, by: "" };
+    const localVersion = maxVersion(state.realtime.edgeVersions.get(id), state.realtime.edgeTombstones.get(id));
+    if (versionCmp(remoteVersion, localVersion) <= 0) continue;
+    edgeMap.set(id, core.cloneGraph(edge));
+    state.realtime.edgeVersions.set(id, remoteVersion);
+    state.realtime.edgeTombstones.delete(id);
+  }
+
+  const filteredEdges = Array.from(edgeMap.values()).filter(
+    (edge) => nodeMap.has(edge.source) && nodeMap.has(edge.target),
+  );
+  const candidate = {
+    nodes: Array.from(nodeMap.values()),
+    edges: filteredEdges,
+    nextId: Math.max(Number(state.graph.nextId) || 1, Number(patch.nextId) || 1),
+  };
+  const validated = core.validateAndNormalizeData(candidate);
+  if (!validated.ok) return;
+
+  state.realtime.applyingRemote = true;
+  state.graph = validated.data;
+  state.realtime.lastRemoteAt = Math.max(state.realtime.lastRemoteAt, Number(payload.at) || Date.now());
+  state.preferredLayout = patch.preferredLayout || state.preferredLayout || "horizontal";
+  state.defaultEdgeShape = normalizeEdgeShape(patch.defaultEdgeShape || state.defaultEdgeShape);
+  if (state.selectedNodeId && !getNode(state.selectedNodeId)) state.selectedNodeId = null;
+  if (state.selectedEdgeId && !getEdge(state.selectedEdgeId)) state.selectedEdgeId = null;
+  saveNow();
+  requestRender();
+  state.realtime.applyingRemote = false;
+}
+
+function sendSnapshotResponse(targetClientId) {
+  if (!state.realtime.connected || !state.realtime.channel || !targetClientId) return;
+  const payload = {
+    sourceId: state.realtime.clientId,
+    targetClientId,
+    projectId: state.currentProjectId || "",
+    at: Date.now(),
+    graph: core.cloneGraph(state.graph),
+    preferredLayout: state.preferredLayout || "horizontal",
+    defaultEdgeShape: normalizeEdgeShape(state.defaultEdgeShape),
+    maxClock: state.realtime.clock,
+  };
+  state.realtime.channel.send({
+    type: "broadcast",
+    event: "snapshot-sync",
+    payload,
+  }).catch(() => {});
+}
+
+function ensureRealtimeClient() {
+  if (state.realtime.client) return state.realtime.client;
+  const cfg = cloudConfig();
+  if (!cfg.enabled) return null;
+  if (!window.supabase || typeof window.supabase.createClient !== "function") return null;
+  try {
+    state.realtime.client = window.supabase.createClient(cfg.url, cfg.anonKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    return state.realtime.client;
+  } catch {
+    return null;
+  }
+}
+
+async function leaveRealtimeChannel() {
+  const client = state.realtime.client;
+  const channel = state.realtime.channel;
+  state.realtime.channel = null;
+  state.realtime.connected = false;
+  state.realtime.peers = new Map();
+  updatePresenceBar();
+  if (client && channel) {
+    try {
+      await client.removeChannel(channel);
+    } catch {
+    }
+  }
+}
+
+async function joinRealtimeChannelForProject(projectId) {
+  await leaveRealtimeChannel();
+  if (!state.realtime.enabled || !projectId) return;
+  state.realtime.seq = 0;
+  state.realtime.seenActions = new Map();
+  state.realtime.lastRemoteAt = 0;
+  state.realtime.lastSnapshotAt = 0;
+  resetRealtimeVersionState(state.graph);
+  const client = ensureRealtimeClient();
+  if (!client) return;
+  const base = state.cloudSyncWorkspace.replace(/[^a-zA-Z0-9_-]/g, "-");
+  const name = `mindmap-${base}-${projectId}`.slice(0, 180);
+  const channel = client.channel(name, {
+    config: {
+      broadcast: { self: false, ack: false },
+      presence: { key: state.realtime.clientId },
+    },
+  });
+
+  channel
+    .on("presence", { event: "sync" }, () => {
+      refreshPresenceFromChannel();
+    })
+    .on("presence", { event: "join" }, () => {
+      refreshPresenceFromChannel();
+    })
+    .on("presence", { event: "leave" }, () => {
+      refreshPresenceFromChannel();
+    })
+    .on("broadcast", { event: "graph-patch" }, ({ payload }) => {
+      applyRemotePatch(payload || null);
+    })
+    .on("broadcast", { event: "snapshot-request" }, ({ payload }) => {
+      if (!payload || payload.projectId !== state.currentProjectId) return;
+      if (payload.sourceId === state.realtime.clientId) return;
+      sendSnapshotResponse(payload.sourceId);
+    })
+    .on("broadcast", { event: "snapshot-sync" }, ({ payload }) => {
+      if (!payload || payload.projectId !== state.currentProjectId) return;
+      if (payload.targetClientId !== state.realtime.clientId) return;
+      applyRemoteSnapshot(payload || null);
+    });
+
+  state.realtime.channel = channel;
+  await new Promise((resolve) => {
+    channel.subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        state.realtime.connected = true;
+        updatePresenceBar();
+        trackRealtimePresence();
+        channel.send({
+          type: "broadcast",
+          event: "snapshot-request",
+          payload: {
+            sourceId: state.realtime.clientId,
+            projectId: state.currentProjectId || "",
+            at: Date.now(),
+          },
+        }).catch(() => {});
+        resolve();
+      } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+        state.realtime.connected = false;
+        updatePresenceBar();
+      }
+    });
+    window.setTimeout(resolve, 2200);
+  });
+}
+
+function cloudRowFromRecord(record) {
+  return {
+    workspace_id: state.cloudSyncWorkspace,
+    project_id: record.id,
+    name: record.name,
+    graph: core.cloneGraph(record.graph),
+    preferred_layout: record.preferredLayout || "horizontal",
+    default_edge_shape: normalizeEdgeShape(record.defaultEdgeShape || "geometrique"),
+    created_at: record.createdAt || new Date().toISOString(),
+    updated_at: record.updatedAt || new Date().toISOString(),
+  };
+}
+
+function recordFromCloudRow(row) {
+  return toProjectRecord({
+    id: row.project_id,
+    name: row.name || "Sans nom",
+    graph: row.graph || createDefaultGraph(),
+    preferredLayout: row.preferred_layout || "horizontal",
+    defaultEdgeShape: normalizeEdgeShape(row.default_edge_shape || "geometrique"),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
+}
+
+async function fetchCloudProjects() {
+  const cfg = cloudConfig();
+  if (!cfg.enabled) return [];
+  const url = `${cfg.url}/rest/v1/mindmap_projects?workspace_id=eq.${encodeURIComponent(
+    state.cloudSyncWorkspace,
+  )}&select=workspace_id,project_id,name,graph,preferred_layout,default_edge_shape,created_at,updated_at&order=updated_at.desc`;
+  const response = await fetch(url, { headers: cloudHeaders() });
+  if (!response.ok) throw new Error(`Cloud list ${response.status}`);
+  const rows = await response.json();
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function upsertCloudProject(record) {
+  const cfg = cloudConfig();
+  if (!cfg.enabled) return;
+  const url = `${cfg.url}/rest/v1/mindmap_projects?on_conflict=workspace_id,project_id`;
+  const body = [cloudRowFromRecord(record)];
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      ...cloudHeaders(),
+      Prefer: "resolution=merge-duplicates,return=minimal",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error(`Cloud upsert ${response.status}`);
+}
+
+async function deleteCloudProject(projectId) {
+  const cfg = cloudConfig();
+  if (!cfg.enabled) return;
+  const url = `${cfg.url}/rest/v1/mindmap_projects?workspace_id=eq.${encodeURIComponent(
+    state.cloudSyncWorkspace,
+  )}&project_id=eq.${encodeURIComponent(projectId)}`;
+  const response = await fetch(url, {
+    method: "DELETE",
+    headers: {
+      ...cloudHeaders(),
+      Prefer: "return=minimal",
+    },
+  });
+  if (!response.ok) throw new Error(`Cloud delete ${response.status}`);
+}
+
+function createDefaultGraph() {
+  return {
+    nodes: [{ id: "1", x: 180, y: 140, title: "Projet", color: "#ffd166", parentId: null }],
+    edges: [],
+    nextId: 2,
+  };
+}
+
+function toProjectRecord({
+  id,
+  name,
+  graph,
+  createdAt = new Date().toISOString(),
+  updatedAt = new Date().toISOString(),
+  preferredLayout = state.preferredLayout,
+  defaultEdgeShape = state.defaultEdgeShape,
+}) {
+  return {
+    id,
+    name,
+    graph: core.cloneGraph(graph),
+    createdAt,
+    updatedAt,
+    preferredLayout,
+    defaultEdgeShape: normalizeEdgeShape(defaultEdgeShape),
+  };
+}
+
+function idbRequest(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("Erreur IndexedDB"));
+  });
+}
+
+function getProjectDb() {
+  if (state.projectDbPromise) return state.projectDbPromise;
+  state.projectDbPromise = new Promise((resolve, reject) => {
+    const request = window.indexedDB.open(PROJECTS_DB_NAME, PROJECTS_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(PROJECTS_STORE)) {
+        db.createObjectStore(PROJECTS_STORE, { keyPath: "id" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("Impossible d'ouvrir la base locale."));
+  });
+  return state.projectDbPromise;
+}
+
+async function listProjectsFromDb() {
+  const db = await getProjectDb();
+  const tx = db.transaction(PROJECTS_STORE, "readonly");
+  const store = tx.objectStore(PROJECTS_STORE);
+  const rows = await idbRequest(store.getAll());
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function getProjectFromDb(id) {
+  const db = await getProjectDb();
+  const tx = db.transaction(PROJECTS_STORE, "readonly");
+  const store = tx.objectStore(PROJECTS_STORE);
+  return idbRequest(store.get(id));
+}
+
+async function putProjectToDb(record) {
+  const db = await getProjectDb();
+  const tx = db.transaction(PROJECTS_STORE, "readwrite");
+  const store = tx.objectStore(PROJECTS_STORE);
+  await idbRequest(store.put(record));
+}
+
+async function deleteProjectFromDb(id) {
+  const db = await getProjectDb();
+  const tx = db.transaction(PROJECTS_STORE, "readwrite");
+  const store = tx.objectStore(PROJECTS_STORE);
+  await idbRequest(store.delete(id));
+}
+
+function makeProjectId() {
+  if (window.crypto && typeof window.crypto.randomUUID === "function") {
+    return window.crypto.randomUUID();
+  }
+  return `project-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+}
+
+function refreshProjectUi() {
+  if (!els.projectSelect) return;
+  const previous = els.projectSelect.value;
+  els.projectSelect.replaceChildren();
+  for (const project of state.projects) {
+    const option = document.createElement("option");
+    option.value = project.id;
+    option.textContent = project.name || "Sans nom";
+    els.projectSelect.appendChild(option);
+  }
+  els.projectSelect.value = state.currentProjectId || previous || "";
+  const hasProject = state.projects.length > 0;
+  const isSingle = state.projects.length <= 1;
+  if (els.projectRenameBtn) els.projectRenameBtn.disabled = !hasProject;
+  if (els.projectDeleteBtn) els.projectDeleteBtn.disabled = !hasProject || isSingle;
+}
+
+async function refreshProjectsFromDb() {
+  const rows = await listProjectsFromDb();
+  rows.sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "fr"));
+  state.projects = rows.map((row) => ({ id: row.id, name: row.name || "Sans nom" }));
+  refreshProjectUi();
+}
+
+function loadProjectIntoState(record, label) {
+  if (!record || !record.graph) return false;
+  const validated = core.validateAndNormalizeData(record.graph);
+  if (!validated.ok) return false;
+  history.clear();
+  state.preferredLayout = record.preferredLayout || state.preferredLayout || "horizontal";
+  state.graph = applyPreferredLayout(validated.data);
+  state.selectedNodeId = null;
+  state.selectedEdgeId = null;
+  state.inlineEditNodeId = null;
+  state.linkDraft = null;
+  state.linkMode = false;
+  state.currentProjectId = record.id;
+  state.currentProjectName = record.name || "Sans nom";
+  state.defaultEdgeShape = normalizeEdgeShape(record.defaultEdgeShape || deriveDefaultEdgeShapeFromGraph());
+  resetRealtimeVersionState(state.graph);
+  state.lastSavedHash = graphHash();
+  localStorage.setItem(ACTIVE_PROJECT_KEY, record.id);
+  if (label) setStatus(label, false);
+  refreshProjectUi();
+  requestRender();
+  return true;
+}
+
+async function persistCurrentProjectToDb() {
+  if (!state.currentProjectId) return;
+  const now = new Date().toISOString();
+  const record = toProjectRecord({
+    id: state.currentProjectId,
+    name: state.currentProjectName || "Sans nom",
+    graph: state.graph,
+    preferredLayout: state.preferredLayout,
+    defaultEdgeShape: state.defaultEdgeShape,
+    updatedAt: now,
+  });
+  const existing = await getProjectFromDb(state.currentProjectId);
+  if (existing && existing.createdAt) {
+    record.createdAt = existing.createdAt;
+  } else {
+    record.createdAt = now;
+  }
+  await putProjectToDb(record);
+  if (state.cloudSyncEnabled) {
+    await upsertCloudProject(record);
+  }
+}
+
+async function syncCloudToLocal() {
+  if (!state.cloudSyncEnabled) return;
+  const cloudRows = await fetchCloudProjects();
+  const localRows = await listProjectsFromDb();
+
+  if (!cloudRows.length) {
+    for (const local of localRows) {
+      await upsertCloudProject(local);
+    }
+    return;
+  }
+
+  const cloudRecords = cloudRows.map(recordFromCloudRow);
+  const cloudMap = new Map(cloudRecords.map((record) => [record.id, record]));
+  for (const record of cloudRecords) {
+    await putProjectToDb(record);
+  }
+  for (const local of localRows) {
+    if (!cloudMap.has(local.id)) {
+      await deleteProjectFromDb(local.id);
+    }
+  }
+}
+
+async function syncCloudFromCurrentState() {
+  if (!state.cloudSyncEnabled || !state.currentProjectId) return;
+  const record = toProjectRecord({
+    id: state.currentProjectId,
+    name: state.currentProjectName || "Sans nom",
+    graph: state.graph,
+    preferredLayout: state.preferredLayout,
+    defaultEdgeShape: state.defaultEdgeShape,
+    updatedAt: new Date().toISOString(),
+  });
+  await upsertCloudProject(record);
 }
 
 function setStatus(_message, _isError) {
@@ -137,6 +1038,24 @@ function getNode(id) {
   return state.graph.nodes.find((node) => node.id === id);
 }
 
+function isPostitNode(node) {
+  return Boolean(node && node.kind === "postit");
+}
+
+function getNodeWidth(node) {
+  const base = isPostitNode(node) ? 240 : core.NODE_WIDTH;
+  const value = Number(node && node.width);
+  if (!Number.isFinite(value)) return base;
+  return Math.max(120, Math.min(760, Math.round(value)));
+}
+
+function getNodeHeight(node) {
+  const base = isPostitNode(node) ? 140 : core.NODE_HEIGHT;
+  const value = Number(node && node.height);
+  if (!Number.isFinite(value)) return base;
+  return Math.max(56, Math.min(720, Math.round(value)));
+}
+
 function getEdge(id) {
   return state.graph.edges.find((edge) => edge.id === id);
 }
@@ -169,6 +1088,61 @@ function normalizeEdgeShape(value) {
   return "geometrique";
 }
 
+function normalizeTextAlign(value, fallback = "left") {
+  if (value === "center" || value === "right" || value === "left") return value;
+  return fallback;
+}
+
+function normalizeTitleLink(value) {
+  if (typeof value !== "string") return "";
+  return value.trim().slice(0, 500);
+}
+
+function isValidHttpLink(value) {
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function extractFirstHttpLink(text) {
+  if (typeof text !== "string") return "";
+  const match = text.match(/https?:\/\/[^\s<>"']+/i);
+  if (!match || !match[0]) return "";
+  const cleaned = match[0].replace(/[),.;!?]+$/, "");
+  return isValidHttpLink(cleaned) ? cleaned : "";
+}
+
+function getExportLink(explicitLink, textFallback) {
+  if (isValidHttpLink(explicitLink)) return explicitLink;
+  return extractFirstHttpLink(textFallback);
+}
+
+function getTextAlignForNode(node) {
+  return normalizeTextAlign(node && node.textAlign, "left");
+}
+
+function getTextAlignForEdge(edge) {
+  return normalizeTextAlign(edge && edge.textAlign, "center");
+}
+
+function isTextBold(target) {
+  return Boolean(target && target.textBold);
+}
+
+function isTextItalic(target) {
+  return Boolean(target && target.textItalic);
+}
+
+function svgAnchorForAlign(align) {
+  if (align === "left") return "start";
+  if (align === "right") return "end";
+  return "middle";
+}
+
 function deriveDefaultEdgeShapeFromGraph() {
   if (!state.graph.edges.length) return state.defaultEdgeShape;
   const counts = new Map([
@@ -192,11 +1166,13 @@ function deriveDefaultEdgeShapeFromGraph() {
 }
 
 function buildObstacle(node, padding = 0) {
+  const nodeWidth = getNodeWidth(node);
+  const nodeHeight = getNodeHeight(node);
   return {
     left: node.x - padding,
     top: node.y - padding,
-    right: node.x + core.NODE_WIDTH + padding,
-    bottom: node.y + core.NODE_HEIGHT + padding,
+    right: node.x + nodeWidth + padding,
+    bottom: node.y + nodeHeight + padding,
   };
 }
 
@@ -283,20 +1259,6 @@ function segmentLength(a, b) {
 
 function alignToStep(value, step = ROUTE_ALIGN_STEP) {
   return Math.round(value / step) * step;
-}
-
-function alignPathInterior(points, step = ROUTE_ALIGN_STEP) {
-  if (!points || points.length < 3) return points;
-  const aligned = points.map((point, index) => {
-    if (index === 0 || index === points.length - 1) {
-      return { x: Math.round(point.x), y: Math.round(point.y) };
-    }
-    return {
-      x: alignToStep(point.x, step),
-      y: alignToStep(point.y, step),
-    };
-  });
-  return compressOrthogonalPath(aligned);
 }
 
 function countTurns(points) {
@@ -415,35 +1377,148 @@ function polylineMidpoint(points) {
 }
 
 function edgeAnchors(source, target) {
-  const sx = source.x + core.NODE_WIDTH / 2;
-  const sy = source.y + core.NODE_HEIGHT / 2;
-  const tx = target.x + core.NODE_WIDTH / 2;
-  const ty = target.y + core.NODE_HEIGHT / 2;
+  const sourceWidth = getNodeWidth(source);
+  const sourceHeight = getNodeHeight(source);
+  const targetWidth = getNodeWidth(target);
+  const targetHeight = getNodeHeight(target);
+  const sx = source.x + sourceWidth / 2;
+  const sy = source.y + sourceHeight / 2;
+  const tx = target.x + targetWidth / 2;
+  const ty = target.y + targetHeight / 2;
   const dx = tx - sx;
   const dy = ty - sy;
 
   if (Math.abs(dx) >= Math.abs(dy)) {
     if (dx >= 0) {
       return {
-        start: { x: source.x + core.NODE_WIDTH, y: sy, side: "right" },
+        start: { x: source.x + sourceWidth, y: sy, side: "right" },
         end: { x: target.x, y: ty, side: "left" },
       };
     }
     return {
       start: { x: source.x, y: sy, side: "left" },
-      end: { x: target.x + core.NODE_WIDTH, y: ty, side: "right" },
+      end: { x: target.x + targetWidth, y: ty, side: "right" },
     };
   }
   if (dy >= 0) {
     return {
-      start: { x: sx, y: source.y + core.NODE_HEIGHT, side: "bottom" },
+      start: { x: sx, y: source.y + sourceHeight, side: "bottom" },
       end: { x: tx, y: target.y, side: "top" },
     };
   }
   return {
     start: { x: sx, y: source.y, side: "top" },
-    end: { x: tx, y: target.y + core.NODE_HEIGHT, side: "bottom" },
+    end: { x: tx, y: target.y + targetHeight, side: "bottom" },
   };
+}
+
+function getTreeFanSide(parent, layout) {
+  const parentCenterX = parent.x + getNodeWidth(parent) / 2;
+  const parentCenterY = parent.y + getNodeHeight(parent) / 2;
+  const children = state.graph.nodes.filter((node) => node.parentId === parent.id);
+  if (!children.length) {
+    return layout === "vertical" ? "bottom" : "right";
+  }
+
+  if (layout === "vertical") {
+    const score = children.reduce((sum, child) => sum + (child.y + getNodeHeight(child) / 2 - parentCenterY), 0);
+    return score >= 0 ? "bottom" : "top";
+  }
+
+  const score = children.reduce((sum, child) => sum + (child.x + getNodeWidth(child) / 2 - parentCenterX), 0);
+  return score >= 0 ? "right" : "left";
+}
+
+function treeEdgeAnchors(source, target, edge) {
+  const layout = state.preferredLayout || "horizontal";
+  const sourceWidth = getNodeWidth(source);
+  const sourceHeight = getNodeHeight(source);
+  const targetWidth = getNodeWidth(target);
+  const targetHeight = getNodeHeight(target);
+  const sx = source.x + sourceWidth / 2;
+  const sy = source.y + sourceHeight / 2;
+  const tx = target.x + targetWidth / 2;
+  const ty = target.y + targetHeight / 2;
+
+  const sourceIsParent = edge && target.parentId === source.id;
+  const fixedSide = sourceIsParent ? getTreeFanSide(source, layout) : null;
+
+  if (layout === "vertical") {
+    const side = fixedSide || (ty >= sy ? "bottom" : "top");
+    if (side === "bottom") {
+      return {
+        start: { x: sx, y: source.y + sourceHeight, side: "bottom" },
+        end: { x: tx, y: target.y, side: "top" },
+      };
+    }
+    return {
+      start: { x: sx, y: source.y, side: "top" },
+      end: { x: tx, y: target.y + targetHeight, side: "bottom" },
+    };
+  }
+
+  const side = fixedSide || (tx >= sx ? "right" : "left");
+  if (side === "right") {
+    return {
+      start: { x: source.x + sourceWidth, y: sy, side: "right" },
+      end: { x: target.x, y: ty, side: "left" },
+    };
+  }
+  return {
+    start: { x: source.x, y: sy, side: "left" },
+    end: { x: target.x + targetWidth, y: ty, side: "right" },
+  };
+}
+
+function clamp(value, min, max) {
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
+}
+
+function parentChildren(parentId) {
+  return state.graph.nodes.filter((node) => node.parentId === parentId);
+}
+
+function computeTreeBusCoordinate(parent, layout, side) {
+  const children = parentChildren(parent.id);
+  const parentWidth = getNodeWidth(parent);
+  const parentHeight = getNodeHeight(parent);
+  if (layout === "vertical") {
+    const startY = side === "bottom" ? parent.y + parentHeight : parent.y;
+    const childPorts = children.map((child) => (side === "bottom" ? child.y : child.y + getNodeHeight(child)));
+    const avgPort = childPorts.length
+      ? childPorts.reduce((sum, value) => sum + value, 0) / childPorts.length
+      : (side === "bottom" ? startY + 220 : startY - 220);
+    let bus = alignToStep((startY + avgPort) / 2);
+    if (side === "bottom") {
+      const min = startY + ROUTE_STUB;
+      const max = childPorts.length ? Math.max(min, Math.min(...childPorts) - ROUTE_STUB) : min + 260;
+      bus = clamp(bus, min, max);
+    } else {
+      const min = childPorts.length ? Math.min(startY - ROUTE_STUB, Math.max(...childPorts) + ROUTE_STUB) : startY - 260;
+      const max = startY - ROUTE_STUB;
+      bus = clamp(bus, min, max);
+    }
+    return bus;
+  }
+
+  const startX = side === "right" ? parent.x + parentWidth : parent.x;
+  const childPorts = children.map((child) => (side === "right" ? child.x : child.x + getNodeWidth(child)));
+  const avgPort = childPorts.length
+    ? childPorts.reduce((sum, value) => sum + value, 0) / childPorts.length
+    : (side === "right" ? startX + 220 : startX - 220);
+  let bus = alignToStep((startX + avgPort) / 2);
+  if (side === "right") {
+    const min = startX + ROUTE_STUB;
+    const max = childPorts.length ? Math.max(min, Math.min(...childPorts) - ROUTE_STUB) : min + 260;
+    bus = clamp(bus, min, max);
+  } else {
+    const min = childPorts.length ? Math.min(startX - ROUTE_STUB, Math.max(...childPorts) + ROUTE_STUB) : startX - 260;
+    const max = startX - ROUTE_STUB;
+    bus = clamp(bus, min, max);
+  }
+  return bus;
 }
 
 function anchorStub(anchor, distance = ROUTE_STUB) {
@@ -451,6 +1526,42 @@ function anchorStub(anchor, distance = ROUTE_STUB) {
   if (anchor.side === "left") return { x: anchor.x - distance, y: anchor.y };
   if (anchor.side === "bottom") return { x: anchor.x, y: anchor.y + distance };
   return { x: anchor.x, y: anchor.y - distance };
+}
+
+function computeTreeAlignedRoute(edge, source, target, occupiedSegments = []) {
+  const anchors = treeEdgeAnchors(source, target, edge);
+  const start = { x: anchors.start.x, y: anchors.start.y };
+  const end = { x: anchors.end.x, y: anchors.end.y };
+  const layout = state.preferredLayout || "horizontal";
+  const side = anchors.start.side;
+
+  let points = null;
+  if (layout === "vertical") {
+    const busY = computeTreeBusCoordinate(source, layout, side);
+    points = compressOrthogonalPath([
+      start,
+      { x: start.x, y: busY },
+      { x: end.x, y: busY },
+      end,
+    ]);
+  } else {
+    const busX = computeTreeBusCoordinate(source, layout, side);
+    points = compressOrthogonalPath([
+      start,
+      { x: busX, y: start.y },
+      { x: busX, y: end.y },
+      end,
+    ]);
+  }
+
+  const obstacles = state.graph.nodes
+    .filter((node) => !isPostitNode(node) && node.id !== source.id && node.id !== target.id)
+    .map((node) => buildObstacle(node, ROUTE_NODE_PADDING));
+  if (pathIntersectsObstacles(points, obstacles)) {
+    return null;
+  }
+  // Keep deterministic tree alignment even with minor overlaps.
+  return points;
 }
 
 function uniqueSortedCandidates(values, center) {
@@ -519,7 +1630,7 @@ function routeOrthogonal(start, end, obstacles, bounds, occupiedSegments = []) {
   let best = null;
   let bestScore = Number.POSITIVE_INFINITY;
   for (const rawPath of candidates) {
-    const path = alignPathInterior(compressOrthogonalPath(rawPath));
+    const path = compressOrthogonalPath(rawPath);
     if (pathIntersectsObstacles(path, obstacles)) continue;
     const score = polylineLength(path)
       + pathConflictScore(path, occupiedSegments)
@@ -530,7 +1641,7 @@ function routeOrthogonal(start, end, obstacles, bounds, occupiedSegments = []) {
       bestScore = score;
     }
   }
-  return best || alignPathInterior(compressOrthogonalPath([start, end]));
+  return best || compressOrthogonalPath([start, end]);
 }
 
 function pointsToPathData(points, offsetX = 0, offsetY = 0) {
@@ -545,18 +1656,30 @@ function pointsToPathData(points, offsetX = 0, offsetY = 0) {
 function smoothCurvePathData(points, offsetX = 0, offsetY = 0) {
   if (!points || points.length === 0) return "";
   if (points.length < 3) return pointsToPathData(points, offsetX, offsetY);
-  const first = points[0];
-  let d = `M ${first.x - offsetX} ${first.y - offsetY}`;
+  const radius = 22;
+  let d = `M ${points[0].x - offsetX} ${points[0].y - offsetY}`;
   for (let i = 1; i < points.length - 1; i += 1) {
-    const current = points[i];
-    const next = points[i + 1];
-    const mx = (current.x + next.x) / 2;
-    const my = (current.y + next.y) / 2;
-    d += ` Q ${current.x - offsetX} ${current.y - offsetY}, ${mx - offsetX} ${my - offsetY}`;
+    const a = points[i - 1];
+    const b = points[i];
+    const c = points[i + 1];
+    const len1 = Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
+    const len2 = Math.abs(c.x - b.x) + Math.abs(c.y - b.y);
+    if (len1 < 0.01 || len2 < 0.01) continue;
+    const r = Math.min(radius, len1 / 2, len2 / 2);
+    const ux1 = (b.x - a.x) / len1;
+    const uy1 = (b.y - a.y) / len1;
+    const ux2 = (c.x - b.x) / len2;
+    const uy2 = (c.y - b.y) / len2;
+    const pIn = { x: b.x - ux1 * r, y: b.y - uy1 * r };
+    const pOut = { x: b.x + ux2 * r, y: b.y + uy2 * r };
+
+    const c1 = { x: pIn.x + ux1 * (r * 0.65), y: pIn.y + uy1 * (r * 0.65) };
+    const c2 = { x: pOut.x - ux2 * (r * 0.65), y: pOut.y - uy2 * (r * 0.65) };
+    d += ` L ${pIn.x - offsetX} ${pIn.y - offsetY}`;
+    d += ` C ${c1.x - offsetX} ${c1.y - offsetY}, ${c2.x - offsetX} ${c2.y - offsetY}, ${pOut.x - offsetX} ${pOut.y - offsetY}`;
   }
-  const beforeLast = points[points.length - 2];
   const last = points[points.length - 1];
-  d += ` Q ${beforeLast.x - offsetX} ${beforeLast.y - offsetY}, ${last.x - offsetX} ${last.y - offsetY}`;
+  d += ` L ${last.x - offsetX} ${last.y - offsetY}`;
   return d;
 }
 
@@ -603,16 +1726,35 @@ function drawEdgePathOnCanvas(ctx, points, shape, offsetX = 0, offsetY = 0) {
       ctx.lineTo(points[1].x - offsetX, points[1].y - offsetY);
       return;
     }
+    const radius = 22;
     for (let i = 1; i < points.length - 1; i += 1) {
-      const current = points[i];
-      const next = points[i + 1];
-      const mx = (current.x + next.x) / 2;
-      const my = (current.y + next.y) / 2;
-      ctx.quadraticCurveTo(current.x - offsetX, current.y - offsetY, mx - offsetX, my - offsetY);
+      const a = points[i - 1];
+      const b = points[i];
+      const c = points[i + 1];
+      const len1 = Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
+      const len2 = Math.abs(c.x - b.x) + Math.abs(c.y - b.y);
+      if (len1 < 0.01 || len2 < 0.01) continue;
+      const r = Math.min(radius, len1 / 2, len2 / 2);
+      const ux1 = (b.x - a.x) / len1;
+      const uy1 = (b.y - a.y) / len1;
+      const ux2 = (c.x - b.x) / len2;
+      const uy2 = (c.y - b.y) / len2;
+      const pIn = { x: b.x - ux1 * r, y: b.y - uy1 * r };
+      const pOut = { x: b.x + ux2 * r, y: b.y + uy2 * r };
+      const c1 = { x: pIn.x + ux1 * (r * 0.65), y: pIn.y + uy1 * (r * 0.65) };
+      const c2 = { x: pOut.x - ux2 * (r * 0.65), y: pOut.y - uy2 * (r * 0.65) };
+      ctx.lineTo(pIn.x - offsetX, pIn.y - offsetY);
+      ctx.bezierCurveTo(
+        c1.x - offsetX,
+        c1.y - offsetY,
+        c2.x - offsetX,
+        c2.y - offsetY,
+        pOut.x - offsetX,
+        pOut.y - offsetY,
+      );
     }
-    const beforeLast = points[points.length - 2];
     const last = points[points.length - 1];
-    ctx.quadraticCurveTo(beforeLast.x - offsetX, beforeLast.y - offsetY, last.x - offsetX, last.y - offsetY);
+    ctx.lineTo(last.x - offsetX, last.y - offsetY);
     return;
   }
 
@@ -650,15 +1792,28 @@ function computeEdgeRoute(edge, occupiedSegments = []) {
   const target = getNode(edge.target);
   if (!source || !target) return null;
 
+  if (edge.type === "tree") {
+    const strictTreePoints = computeTreeAlignedRoute(edge, source, target, occupiedSegments);
+    if (strictTreePoints) {
+      const strictMid = polylineMidpoint(strictTreePoints);
+      return {
+        points: strictTreePoints,
+        path: pointsToPathData(strictTreePoints),
+        mid: strictMid,
+      };
+    }
+  }
+
   const anchors = edgeAnchors(source, target);
   const start = { x: anchors.start.x, y: anchors.start.y };
   const end = { x: anchors.end.x, y: anchors.end.y };
   const startStub = anchorStub(anchors.start);
   const endStub = anchorStub(anchors.end);
   const obstacles = state.graph.nodes
-    .filter((node) => node.id !== source.id && node.id !== target.id)
+    .filter((node) => !isPostitNode(node) && node.id !== source.id && node.id !== target.id)
     .map((node) => buildObstacle(node, ROUTE_NODE_PADDING));
-  const bounds = core.getBounds(state.graph.nodes);
+  const routingNodes = state.graph.nodes.filter((node) => !isPostitNode(node));
+  const bounds = core.getBounds(routingNodes);
 
   const middle = routeOrthogonal(startStub, endStub, obstacles, bounds, occupiedSegments);
   const points = compressOrthogonalPath([start, startStub, ...middle, endStub, end]);
@@ -682,6 +1837,30 @@ function computeOrderedRouteForEdge(edgeId) {
   return null;
 }
 
+function computeLinkDraftRoute() {
+  if (!state.linkDraft || !state.linkDraftCursor) return null;
+  const source = getNode(state.linkDraft.sourceId);
+  if (!source) return null;
+  const sourceWidth = getNodeWidth(source);
+  const sourceHeight = getNodeHeight(source);
+  const target = state.linkDraftCursor;
+  const sx = source.x + sourceWidth / 2;
+  const sy = source.y + sourceHeight / 2;
+  const dx = target.x - sx;
+  const dy = target.y - sy;
+  const start = Math.abs(dx) >= Math.abs(dy)
+    ? (dx >= 0
+      ? { x: source.x + sourceWidth, y: sy, side: "right" }
+      : { x: source.x, y: sy, side: "left" })
+    : (dy >= 0
+      ? { x: sx, y: source.y + sourceHeight, side: "bottom" }
+      : { x: sx, y: source.y, side: "top" });
+  const stub = anchorStub(start, ROUTE_STUB);
+  return (start.side === "right" || start.side === "left")
+    ? compressOrthogonalPath([start, stub, { x: target.x, y: stub.y }, target])
+    : compressOrthogonalPath([start, stub, { x: stub.x, y: target.y }, target]);
+}
+
 function createFreeEdge(sourceId, targetId) {
   if (!sourceId || !targetId || sourceId === targetId) return;
   const source = getNode(sourceId);
@@ -697,9 +1876,9 @@ function createFreeEdge(sourceId, targetId) {
       source: sourceId,
       target: targetId,
       type: "free",
-      color: "#e15d44",
+      color: state.defaultEdgeColor,
       label: "",
-      style: "dashed",
+      style: state.defaultEdgeStyle,
       shape: state.defaultEdgeShape,
     });
     state.selectedEdgeId = null;
@@ -719,6 +1898,10 @@ function startLinkDraft(sourceId) {
   state.linkDraft = {
     sourceId,
   };
+  state.linkDraftCursor = {
+    x: source.x + getNodeWidth(source) + 120,
+    y: source.y + getNodeHeight(source) / 2,
+  };
   requestRender();
 }
 
@@ -726,6 +1909,7 @@ function finishLinkDraft(targetNodeId) {
   if (!state.linkDraft) return;
   const sourceId = state.linkDraft.sourceId;
   state.linkDraft = null;
+  state.linkDraftCursor = null;
   state.linkMode = false;
   if (targetNodeId) {
     createFreeEdge(sourceId, targetNodeId);
@@ -781,10 +1965,25 @@ function magnetiserPositionNoeud(nodeId, x, y) {
 
 function appliquerStyleParDefaut(node) {
   if (!node) return;
+  if (node.kind !== "postit") node.kind = "node";
+  node.width = getNodeWidth(node);
+  node.height = getNodeHeight(node);
   if (typeof node.textColor !== "string") node.textColor = "#1f2230";
   if (typeof node.borderColor !== "string") node.borderColor = "#5c647f";
   if (!Number.isFinite(node.borderWidth)) node.borderWidth = 2;
   if (!Number.isFinite(node.radius)) node.radius = 14;
+  node.textAlign = getTextAlignForNode(node);
+  node.textBold = isTextBold(node);
+  node.textItalic = isTextItalic(node);
+  node.titleLink = normalizeTitleLink(node.titleLink);
+}
+
+function appliquerTexteLienParDefaut(edge) {
+  if (!edge) return;
+  edge.textAlign = getTextAlignForEdge(edge);
+  edge.textBold = isTextBold(edge);
+  edge.textItalic = isTextItalic(edge);
+  edge.titleLink = normalizeTitleLink(edge.titleLink);
 }
 
 function computeMapSize() {
@@ -868,6 +2067,12 @@ function genererTemplate(type) {
 }
 
 function commit(mutator, label) {
+  if (state.selectedNodeId && isNodeLockedByOther(state.selectedNodeId)) {
+    const owner = getLockOwner(state.selectedNodeId);
+    setStatus(`Nœud verrouillé par ${owner ? owner.name : "un autre membre"}`, true);
+    requestRender();
+    return false;
+  }
   const before = core.cloneGraph(state.graph);
   mutator();
   const validated = core.validateAndNormalizeData(state.graph);
@@ -881,15 +2086,19 @@ function commit(mutator, label) {
 
   const changed = JSON.stringify(before) !== JSON.stringify(state.graph);
   if (!changed) return false;
+  const patch = createRealtimePatch(before, state.graph);
 
   history.push(before);
   saveNow();
+  broadcastRealtimePatch(patch, label || "update");
+  trackRealtimePresence();
   setStatus(label || "Mis à jour", false);
   requestRender();
   return true;
 }
 
 function applyGraph(nextGraph, label) {
+  const before = core.cloneGraph(state.graph);
   const graphToApply = applyPreferredLayout(nextGraph);
   const validated = core.validateAndNormalizeData(graphToApply);
   if (!validated.ok) {
@@ -901,13 +2110,19 @@ function applyGraph(nextGraph, label) {
   state.selectedEdgeId = null;
   state.linkingFrom = null;
   state.defaultEdgeShape = deriveDefaultEdgeShapeFromGraph();
+  const patch = createRealtimePatch(before, state.graph);
   saveNow();
+  broadcastRealtimePatch(patch, label || "apply-graph");
   setStatus(label || "Chargé", false);
   requestRender();
   return true;
 }
 
 function selectNode(id) {
+  if (id && isNodeLockedByOther(id)) {
+    const owner = getLockOwner(id);
+    setStatus(`Édition par ${owner ? owner.name : "un autre membre"}`, true);
+  }
   state.selectedNodeId = id;
   state.selectedEdgeId = null;
   const node = getNode(id);
@@ -918,6 +2133,7 @@ function selectNode(id) {
   els.borderColorInput.value = node ? node.borderColor : "#5c647f";
   els.borderWidthInput.value = String(node ? node.borderWidth : 2);
   els.radiusInput.value = String(node ? node.radius : 14);
+  trackRealtimePresence();
   requestRender();
 }
 
@@ -926,10 +2142,15 @@ function selectEdge(id) {
   state.selectedNodeId = null;
   const edge = getEdge(id);
   if (edge) {
+    appliquerTexteLienParDefaut(edge);
     els.edgeTitleInput.value = edge.label || "";
     els.edgeColorInput.value = getEdgeColor(edge);
     els.edgeStyleSelect.value = getEdgeStyle(edge);
+    if (els.edgeTitleLinkInput) {
+      els.edgeTitleLinkInput.value = edge.titleLink || "";
+    }
   }
+  trackRealtimePresence();
   requestRender();
 }
 
@@ -938,34 +2159,74 @@ function clearSelection() {
   state.selectedEdgeId = null;
   state.linkingFrom = null;
   state.linkDraft = null;
+  trackRealtimePresence();
   requestRender();
 }
 
 function centerOnNode(nodeId) {
   const node = getNode(nodeId);
   if (!node) return;
+  const nodeWidth = getNodeWidth(node);
+  const nodeHeight = getNodeHeight(node);
   const rect = els.canvas.getBoundingClientRect();
-  state.viewport.x = rect.width / 2 - (node.x + core.NODE_WIDTH / 2) * state.viewport.zoom;
-  state.viewport.y = rect.height / 2 - (node.y + core.NODE_HEIGHT / 2) * state.viewport.zoom;
+  state.viewport.x = rect.width / 2 - (node.x + nodeWidth / 2) * state.viewport.zoom;
+  state.viewport.y = rect.height / 2 - (node.y + nodeHeight / 2) * state.viewport.zoom;
   requestRender();
 }
 
 function createNode({
   x = 160,
   y = 120,
+  kind = "node",
+  width,
+  height,
   title = "Nœud",
   color = "#ffd166",
   textColor = "#1f2230",
   borderColor = "#5c647f",
   borderWidth = 2,
   radius = 14,
+  textAlign = "left",
+  textBold = false,
+  textItalic = false,
+  titleLink = "",
   parentId = null,
 } = {}) {
   commit(() => {
     const id = String(state.graph.nextId++);
-    state.graph.nodes.push({ id, x, y, title, color, textColor, borderColor, borderWidth, radius, parentId });
-    if (parentId) {
-      state.graph.edges.push({ id: `tree-${parentId}-${id}`, source: parentId, target: id, type: "tree" });
+    state.graph.nodes.push({
+      id,
+      x,
+      y,
+      kind: kind === "postit" ? "postit" : "node",
+      width,
+      height,
+      title,
+      color,
+      textColor,
+      borderColor,
+      borderWidth,
+      radius,
+      textAlign,
+      textBold,
+      textItalic,
+      titleLink,
+      parentId,
+    });
+    if (parentId && kind !== "postit") {
+      state.graph.edges.push({
+        id: `tree-${parentId}-${id}`,
+        source: parentId,
+        target: id,
+        type: "tree",
+        color: state.defaultEdgeColor,
+        style: state.defaultEdgeStyle,
+        shape: state.defaultEdgeShape,
+        textAlign: "center",
+        textBold: false,
+        textItalic: false,
+        titleLink: "",
+      });
     }
     if (state.preferredLayout) {
       state.graph = core.layoutGraph(state.graph, state.preferredLayout);
@@ -981,10 +2242,30 @@ function createRootAtCenter() {
   createNode({ x: center.x, y: center.y, title: `Racine ${state.graph.nodes.length + 1}` });
 }
 
+function createPostitAtCenter() {
+  const rect = els.canvas.getBoundingClientRect();
+  const center = toWorld(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  createNode({
+    x: center.x + 40,
+    y: center.y + 24,
+    kind: "postit",
+    width: 260,
+    height: 160,
+    title: "Commentaire",
+    color: "#ffe68e",
+    textColor: "#42310d",
+    borderColor: "#c88d17",
+    borderWidth: 2,
+    radius: 10,
+    parentId: null,
+  });
+}
+
 function addChildToSelected() {
   if (!state.selectedNodeId) return;
   const parent = getNode(state.selectedNodeId);
   if (!parent) return;
+  if (isPostitNode(parent)) return;
   createNode({
     x: parent.x + 260,
     y: parent.y + 80,
@@ -1025,7 +2306,8 @@ function toggleLinkMode() {
     finishLinkDraft(null);
     return;
   }
-  if (state.selectedNodeId && getNode(state.selectedNodeId)) {
+  const selected = state.selectedNodeId ? getNode(state.selectedNodeId) : null;
+  if (selected && !isPostitNode(selected)) {
     startLinkDraft(state.selectedNodeId);
   } else {
     setStatus("Sélectionnez d'abord un nœud", true);
@@ -1043,7 +2325,7 @@ function applyNodeStylePreset(preset) {
   };
   const style = presets[preset];
   if (!style) return;
-  commit(() => {
+  const changed = commit(() => {
     const node = getNode(state.selectedNodeId);
     if (!node) return;
     node.color = style.color;
@@ -1052,6 +2334,51 @@ function applyNodeStylePreset(preset) {
     node.borderWidth = style.borderWidth;
     node.radius = style.radius;
   }, "Style du nœud appliqué");
+  if (changed && state.selectedNodeId) {
+    selectNode(state.selectedNodeId);
+  }
+}
+
+function traitPresetConfig(preset) {
+  const map = {
+    net: { color: "#2f98ff", style: "solid", shape: "geometrique" },
+    signal: { color: "#e15d44", style: "dashed", shape: "arrondi" },
+    flux: { color: "#6f63ff", style: "solid", shape: "courbe" },
+    organique: { color: "#18b982", style: "dotted", shape: "courbe" },
+    discret: { color: "#6d86b8", style: "solid", shape: "geometrique" },
+  };
+  return map[preset] || map.signal;
+}
+
+function applyTraitPresetGlobal(preset) {
+  const cfg = traitPresetConfig(preset);
+  state.activeTraitPreset = preset;
+  state.defaultEdgeColor = cfg.color;
+  state.defaultEdgeStyle = cfg.style;
+  state.defaultEdgeShape = cfg.shape;
+  if (!state.graph.edges.length) {
+    requestRender();
+    return;
+  }
+  commit(() => {
+    for (const edge of state.graph.edges) {
+      edge.color = cfg.color;
+      edge.style = cfg.style;
+      edge.shape = cfg.shape;
+    }
+  }, "Preset de traits appliqué");
+}
+
+function applyEdgePresetToSelected(preset) {
+  if (!state.selectedEdgeId) return;
+  const cfg = traitPresetConfig(preset);
+  commit(() => {
+    const edge = getEdge(state.selectedEdgeId);
+    if (!edge) return;
+    edge.color = cfg.color;
+    edge.style = cfg.style;
+    edge.shape = cfg.shape;
+  }, "Preset du lien appliqué");
 }
 
 function onNodeClick(nodeId) {
@@ -1084,21 +2411,29 @@ function appliquerTemplateSelectionne() {
 }
 
 function undo() {
+  const before = core.cloneGraph(state.graph);
   const prev = history.undo(state.graph);
   if (!prev) return;
   state.graph = prev;
   state.selectedEdgeId = null;
   state.linkingFrom = null;
+  const patch = createRealtimePatch(before, state.graph);
+  saveNow();
+  broadcastRealtimePatch(patch, "undo");
   setStatus("Annulation", false);
   requestRender();
 }
 
 function redo() {
+  const before = core.cloneGraph(state.graph);
   const next = history.redo(state.graph);
   if (!next) return;
   state.graph = next;
   state.selectedEdgeId = null;
   state.linkingFrom = null;
+  const patch = createRealtimePatch(before, state.graph);
+  saveNow();
+  broadcastRealtimePatch(patch, "redo");
   setStatus("Rétablissement", false);
   requestRender();
 }
@@ -1122,31 +2457,21 @@ function saveNow() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
   state.lastAutosaveAt = Date.now();
   state.lastSavedHash = graphHash();
+  void persistCurrentProjectToDb().catch(() => {});
 }
 
-function loadNow() {
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if (!raw) {
-    setStatus("Aucune carte enregistrée trouvée", true);
+async function loadNow() {
+  if (!state.currentProjectId) {
+    setStatus("Aucun projet actif", true);
     return;
   }
-  try {
-    const parsed = JSON.parse(raw);
-    const validated = core.validateAndNormalizeData(parsed);
-    if (!validated.ok) {
-      setStatus(`Données enregistrées invalides : ${traduireErreurValidation(validated.errors[0])}`, true);
-      return;
-    }
-    history.clear();
-    state.graph = applyPreferredLayout(validated.data);
-    state.inlineEditNodeId = null;
-    state.lastSavedHash = graphHash();
-    state.selectedNodeId = null;
-    state.selectedEdgeId = null;
-    setStatus("Chargée depuis le stockage local", false);
-    requestRender();
-  } catch {
-    setStatus("Impossible de lire les données enregistrées", true);
+  const row = await getProjectFromDb(state.currentProjectId);
+  if (!row) {
+    setStatus("Projet introuvable", true);
+    return;
+  }
+  if (!loadProjectIntoState(row, "Projet rechargé")) {
+    setStatus("Projet invalide", true);
   }
 }
 
@@ -1203,7 +2528,7 @@ function getExportContext() {
 
   if (region === "subtree" && state.selectedNodeId) {
     nodeIds = core.collectSubtreeIds(state.graph.nodes, state.selectedNodeId);
-    bounds = core.getBounds(state.graph.nodes, nodeIds);
+    bounds = getContentBounds(nodeIds);
   } else if (region === "visible") {
     const rect = els.canvas.getBoundingClientRect();
     const x = (-state.viewport.x) / state.viewport.zoom;
@@ -1212,7 +2537,7 @@ function getExportContext() {
     const height = rect.height / state.viewport.zoom;
     bounds = { x, y, width, height };
   } else {
-    bounds = core.getBounds(state.graph.nodes);
+    bounds = getContentBounds();
   }
 
   return {
@@ -1225,6 +2550,46 @@ function getExportContext() {
     nodeIds,
     scale: scale * scaleByDpi,
     transparent,
+  };
+}
+
+function getContentBounds(nodeIds) {
+  const base = core.getBounds(state.graph.nodes, nodeIds);
+  let minX = base.x;
+  let minY = base.y;
+  let maxX = base.x + base.width;
+  let maxY = base.y + base.height;
+
+  for (const edge of state.graph.edges) {
+    if (!edgeVisible(edge, nodeIds)) continue;
+    const route = computeEdgeRoute(edge, []);
+    if (!route || !route.points || route.points.length === 0) continue;
+
+    for (const point of route.points) {
+      if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
+      minX = Math.min(minX, point.x);
+      minY = Math.min(minY, point.y);
+      maxX = Math.max(maxX, point.x);
+      maxY = Math.max(maxY, point.y);
+    }
+
+    if (edge.label) {
+      const align = getTextAlignForEdge(edge);
+      const baseX = route.mid.x;
+      const labelX = align === "left" ? baseX - 54 : align === "right" ? baseX + 54 : baseX;
+      const labelY = route.mid.y - 8;
+      minX = Math.min(minX, labelX - 120);
+      maxX = Math.max(maxX, labelX + 120);
+      minY = Math.min(minY, labelY - 20);
+      maxY = Math.max(maxY, labelY + 20);
+    }
+  }
+
+  return {
+    x: minX,
+    y: minY,
+    width: Math.max(1, maxX - minX),
+    height: Math.max(1, maxY - minY),
   };
 }
 
@@ -1245,9 +2610,9 @@ function runExportFromModal() {
   if (format === "svg") {
     exportSvg();
     setStatus("Export SVG généré", false);
-  } else if (format === "json") {
-    exportJson();
-    setStatus("Export JSON généré", false);
+  } else if (format === "pdf") {
+    exportPdf();
+    setStatus("Export PDF prêt (impression)", false);
   } else {
     exportPng();
     setStatus("Export PNG généré", false);
@@ -1289,28 +2654,40 @@ function renderToCanvas(ctx, bounds, nodeIds, transparent) {
     else ctx.setLineDash([]);
     ctx.stroke();
     if (edge.label) {
+      appliquerTexteLienParDefaut(edge);
       ctx.setLineDash([]);
       ctx.fillStyle = "#2a3140";
-      ctx.fillText(edge.label, route.mid.x - bounds.x, route.mid.y - bounds.y - 8);
+      const align = getTextAlignForEdge(edge);
+      ctx.textAlign = align;
+      ctx.font = `${isTextItalic(edge) ? "italic " : ""}${isTextBold(edge) ? "700 " : "500 "}12px Avenir Next, Segoe UI, sans-serif`;
+      const baseX = route.mid.x - bounds.x;
+      const x = align === "left" ? baseX - 54 : align === "right" ? baseX + 54 : baseX;
+      ctx.fillText(edge.label, x, route.mid.y - bounds.y - 8);
     }
     addPathSegments(route.points, occupied);
   }
 
   ctx.setLineDash([]);
   ctx.textBaseline = "middle";
-  ctx.font = "14px Avenir Next, Segoe UI, sans-serif";
+  ctx.font = "500 14px Avenir Next, Segoe UI, sans-serif";
 
   for (const node of state.graph.nodes) {
     appliquerStyleParDefaut(node);
     if (nodeIds && !nodeIds.has(node.id)) continue;
     const x = node.x - bounds.x;
     const y = node.y - bounds.y;
-    roundRect(ctx, x, y, core.NODE_WIDTH, core.NODE_HEIGHT, node.radius, node.color);
+    const nodeWidth = getNodeWidth(node);
+    const nodeHeight = getNodeHeight(node);
+    roundRect(ctx, x, y, nodeWidth, nodeHeight, node.radius, node.color);
     ctx.strokeStyle = node.id === state.selectedNodeId ? "#2d6cdf" : node.borderColor;
     ctx.lineWidth = node.id === state.selectedNodeId ? Math.max(3, node.borderWidth) : node.borderWidth;
     ctx.stroke();
     ctx.fillStyle = node.textColor;
-    ctx.fillText(node.title, x + 14, y + core.NODE_HEIGHT / 2);
+    const align = getTextAlignForNode(node);
+    ctx.textAlign = align;
+    ctx.font = `${isTextItalic(node) ? "italic " : ""}${isTextBold(node) ? "700 " : "500 "}14px Avenir Next, Segoe UI, sans-serif`;
+    const textX = align === "left" ? x + 14 : align === "right" ? x + nodeWidth - 14 : x + nodeWidth / 2;
+    ctx.fillText(node.title, textX, y + nodeHeight / 2);
   }
 }
 
@@ -1330,10 +2707,8 @@ function exportPng() {
   }, "image/png");
 }
 
-function exportSvg() {
-  const { bounds, nodeIds, transparent } = getExportContext();
-  let svg = `<?xml version="1.0" encoding="UTF-8"?>`;
-  svg += `<svg xmlns="http://www.w3.org/2000/svg" width="${bounds.width}" height="${bounds.height}" viewBox="0 0 ${bounds.width} ${bounds.height}">`;
+function buildSvgMarkup(bounds, nodeIds, transparent, withLinks = false) {
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${bounds.width}" height="${bounds.height}" viewBox="0 0 ${bounds.width} ${bounds.height}">`;
   if (!transparent) {
     svg += `<rect width="100%" height="100%" fill="#f4f6fb" />`;
   }
@@ -1350,7 +2725,23 @@ function exportSvg() {
       dash ? `stroke-dasharray="${dash}"` : ""
     } />`;
     if (edge.label) {
-      svg += `<text x="${route.mid.x - bounds.x}" y="${route.mid.y - bounds.y - 8}" class="edge-label" text-anchor="middle" dominant-baseline="middle" font-family="Avenir Next, Segoe UI, sans-serif" font-size="12" fill="#2a3140">${escapeXml(edge.label)}</text>`;
+      appliquerTexteLienParDefaut(edge);
+      const align = getTextAlignForEdge(edge);
+      const baseX = route.mid.x - bounds.x;
+      const x = align === "left" ? baseX - 54 : align === "right" ? baseX + 54 : baseX;
+      const textNode = `<text x="${x}" y="${route.mid.y - bounds.y - 8}" class="edge-label" text-anchor="${svgAnchorForAlign(
+        align,
+      )}" dominant-baseline="middle" font-family="Avenir Next, Segoe UI, sans-serif" font-size="12" font-weight="${
+        isTextBold(edge) ? "700" : "500"
+      }" font-style="${isTextItalic(edge) ? "italic" : "normal"}" fill="#2a3140">${
+        escapeXml(edge.label)
+      }</text>`;
+      const edgeLink = getExportLink(edge.titleLink, edge.label);
+      if (withLinks && edgeLink) {
+        svg += `<a href="${escapeXml(edgeLink)}" target="_blank" rel="noopener noreferrer">${textNode}</a>`;
+      } else {
+        svg += textNode;
+      }
     }
     addPathSegments(route.points, occupied);
   }
@@ -1360,17 +2751,179 @@ function exportSvg() {
     if (nodeIds && !nodeIds.has(node.id)) continue;
     const x = node.x - bounds.x;
     const y = node.y - bounds.y;
-    svg += `<rect x="${x}" y="${y}" width="${core.NODE_WIDTH}" height="${core.NODE_HEIGHT}" rx="${node.radius}" ry="${node.radius}" fill="${escapeXml(
+    const nodeWidth = getNodeWidth(node);
+    const nodeHeight = getNodeHeight(node);
+    svg += `<rect x="${x}" y="${y}" width="${nodeWidth}" height="${nodeHeight}" rx="${node.radius}" ry="${node.radius}" fill="${escapeXml(
       node.color,
     )}" stroke="${node.id === state.selectedNodeId ? "#2d6cdf" : escapeXml(node.borderColor)}" stroke-width="${
       node.id === state.selectedNodeId ? Math.max(3, node.borderWidth) : node.borderWidth
     }" />`;
-    svg += `<text x="${x + 14}" y="${y + core.NODE_HEIGHT / 2 + 1}" dominant-baseline="middle" font-family="Avenir Next, Segoe UI, sans-serif" font-size="14" fill="${escapeXml(node.textColor)}">${escapeXml(
+    const align = getTextAlignForNode(node);
+    const textX = align === "left" ? x + 14 : align === "right" ? x + nodeWidth - 14 : x + nodeWidth / 2;
+    const textNode = `<text x="${textX}" y="${y + nodeHeight / 2 + 1}" text-anchor="${svgAnchorForAlign(
+      align,
+    )}" dominant-baseline="middle" font-family="Avenir Next, Segoe UI, sans-serif" font-size="14" font-weight="${
+      isTextBold(node) ? "700" : "500"
+    }" font-style="${isTextItalic(node) ? "italic" : "normal"}" fill="${escapeXml(node.textColor)}">${escapeXml(
       node.title,
     )}</text>`;
+    const nodeLink = getExportLink(node.titleLink, node.title);
+    if (withLinks && nodeLink) {
+      svg += `<a href="${escapeXml(nodeLink)}" target="_blank" rel="noopener noreferrer">${textNode}</a>`;
+    } else {
+      svg += textNode;
+    }
   }
 
   svg += `</svg>`;
+  return svg;
+}
+
+function collectPdfLinkOverlays(bounds, nodeIds) {
+  const overlays = [];
+  const occupied = [];
+
+  for (const edge of state.graph.edges) {
+    if (!edgeVisible(edge, nodeIds)) continue;
+    const route = computeEdgeRoute(edge, occupied);
+    if (!route) continue;
+
+    if (edge.label) {
+      appliquerTexteLienParDefaut(edge);
+      const edgeLink = getExportLink(edge.titleLink, edge.label);
+      if (edgeLink) {
+        const align = getTextAlignForEdge(edge);
+        const baseX = route.mid.x - bounds.x;
+        const x = align === "left" ? baseX - 54 : align === "right" ? baseX + 54 : baseX;
+        const width = Math.max(54, Math.min(480, edge.label.length * 7 + 28));
+        const left = align === "left" ? x : align === "right" ? x - width : x - width / 2;
+        overlays.push({
+          href: edgeLink,
+          left,
+          top: route.mid.y - bounds.y - 20,
+          width,
+          height: 24,
+        });
+      }
+    }
+    addPathSegments(route.points, occupied);
+  }
+
+  for (const node of state.graph.nodes) {
+    if (nodeIds && !nodeIds.has(node.id)) continue;
+    appliquerStyleParDefaut(node);
+    const nodeLink = getExportLink(node.titleLink, node.title);
+    if (!nodeLink) continue;
+    overlays.push({
+      href: nodeLink,
+      left: node.x - bounds.x,
+      top: node.y - bounds.y,
+      width: getNodeWidth(node),
+      height: getNodeHeight(node),
+    });
+  }
+
+  return overlays;
+}
+
+function exportPdf() {
+  const { bounds, nodeIds, transparent } = getExportContext();
+  const isLandscape = bounds.width >= bounds.height;
+  const pageSize = isLandscape ? "297mm 210mm" : "210mm 297mm";
+  const svgMarkup = buildSvgMarkup(bounds, nodeIds, transparent, false);
+  const linkOverlays = collectPdfLinkOverlays(bounds, nodeIds);
+  const linksMarkup = linkOverlays
+    .map((overlay) => {
+      const leftPct = (overlay.left / bounds.width) * 100;
+      const topPct = (overlay.top / bounds.height) * 100;
+      const widthPct = (overlay.width / bounds.width) * 100;
+      const heightPct = (overlay.height / bounds.height) * 100;
+      return `<a class="pdf-link" href="${escapeXml(overlay.href)}" target="_blank" rel="noopener noreferrer" style="left:${leftPct}%;top:${topPct}%;width:${widthPct}%;height:${heightPct}%;" aria-label="Lien exporté"></a>`;
+    })
+    .join("");
+  const popup = window.open("", "_blank");
+  if (!popup) return;
+  popup.document.write(`
+    <!doctype html>
+    <html lang="fr">
+      <head>
+        <meta charset="utf-8" />
+        <title>Export PDF - Mindmap</title>
+        <style>
+          @page { size: ${pageSize}; margin: 0; }
+          html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #ffffff;
+          }
+          .page {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+          }
+          .sheet {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+          }
+          svg {
+            width: 100%;
+            height: 100%;
+            display: block;
+          }
+          .pdf-link {
+            position: absolute;
+            display: block;
+            z-index: 3;
+            background: transparent;
+            color: transparent;
+            text-decoration: none;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="page">
+          <div class="sheet" id="pdf-sheet">
+            ${svgMarkup}
+            ${linksMarkup}
+          </div>
+        </div>
+        <script>
+          const ratio = ${bounds.width} / ${bounds.height};
+          const sheet = document.getElementById('pdf-sheet');
+          function fitSheet() {
+            const vw = window.innerWidth;
+            const vh = window.innerHeight;
+            let w = vw;
+            let h = w / ratio;
+            if (h > vh) {
+              h = vh;
+              w = h * ratio;
+            }
+            sheet.style.width = w + 'px';
+            sheet.style.height = h + 'px';
+          }
+          window.addEventListener('resize', fitSheet);
+          window.addEventListener('load', () => {
+            fitSheet();
+            setTimeout(() => { window.print(); }, 120);
+          });
+        <\/script>
+      </body>
+    </html>
+  `);
+  popup.document.close();
+}
+
+function exportSvg() {
+  const { bounds, nodeIds, transparent } = getExportContext();
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>${buildSvgMarkup(bounds, nodeIds, transparent, false)}`;
   const blob = new Blob([svg], { type: "image/svg+xml" });
   downloadBlob(blob, "mindmap.svg");
 }
@@ -1416,22 +2969,56 @@ function renderNodes() {
     element.dataset.id = node.id;
     element.style.left = `${node.x}px`;
     element.style.top = `${node.y}px`;
+    const nodeWidth = getNodeWidth(node);
+    const nodeHeight = getNodeHeight(node);
+    element.style.width = `${nodeWidth}px`;
+    element.style.minHeight = `${nodeHeight}px`;
+    element.style.height = isPostitNode(node) ? `${nodeHeight}px` : "";
     element.style.background = node.color;
     element.style.color = node.textColor;
     element.style.borderColor = node.borderColor;
     element.style.borderWidth = `${node.borderWidth}px`;
     element.style.borderRadius = `${node.radius}px`;
+    if (isPostitNode(node)) {
+      element.classList.add("node-postit");
+    }
 
-    if (state.inlineEditNodeId === node.id) {
+    if (isPostitNode(node)) {
+      const textarea = document.createElement("textarea");
+      textarea.value = node.title || "";
+      textarea.className = "postit-editor";
+      textarea.style.textAlign = getTextAlignForNode(node);
+      textarea.style.fontWeight = isTextBold(node) ? "700" : "500";
+      textarea.style.fontStyle = isTextItalic(node) ? "italic" : "normal";
+      textarea.setAttribute("data-postit-editor", "true");
+      textarea.setAttribute("data-node-id", node.id);
+      title.replaceWith(textarea);
+      const grip = document.createElement("div");
+      grip.className = "postit-grip";
+      grip.title = "Déplacer";
+      element.appendChild(grip);
+      const resize = document.createElement("div");
+      resize.className = "postit-resize-handle";
+      resize.title = "Redimensionner";
+      element.appendChild(resize);
+    } else if (state.inlineEditNodeId === node.id) {
       const input = document.createElement("input");
       input.type = "text";
       input.value = node.title;
       input.className = "node-input";
+      input.style.textAlign = getTextAlignForNode(node);
+      input.style.fontWeight = isTextBold(node) ? "700" : "500";
+      input.style.fontStyle = isTextItalic(node) ? "italic" : "normal";
       input.setAttribute("data-inline-editor", "true");
       input.setAttribute("data-node-id", node.id);
       title.replaceWith(input);
     } else {
       title.textContent = node.title;
+      title.style.textAlign = getTextAlignForNode(node);
+      title.style.fontWeight = isTextBold(node) ? "700" : "500";
+      title.style.fontStyle = isTextItalic(node) ? "italic" : "normal";
+      title.style.textDecoration = node.titleLink ? "underline" : "none";
+      title.style.textDecorationThickness = node.titleLink ? "1.5px" : "0px";
     }
 
     if (node.id === state.selectedNodeId) {
@@ -1439,6 +3026,15 @@ function renderNodes() {
     }
     if (state.linkDraft && state.linkDraft.sourceId === node.id) {
       element.classList.add("linking-source");
+    }
+    const lockOwner = getLockOwner(node.id);
+    if (lockOwner) {
+      element.classList.add("locked-by-peer");
+      const badge = document.createElement("span");
+      badge.className = "node-lock-badge";
+      badge.title = `Édition: ${lockOwner.name}`;
+      badge.textContent = peerInitials(lockOwner.name);
+      element.appendChild(badge);
     }
     fragment.appendChild(nodeFragment);
   }
@@ -1480,15 +3076,36 @@ function renderEdges() {
     fragment.appendChild(path);
 
     if (edge.label) {
+      appliquerTexteLienParDefaut(edge);
+      const align = getTextAlignForEdge(edge);
+      const labelBaseX = route.mid.x;
+      const labelX = align === "left" ? labelBaseX - 54 : align === "right" ? labelBaseX + 54 : labelBaseX;
       const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
-      label.setAttribute("x", String(route.mid.x));
+      label.setAttribute("x", String(labelX));
       label.setAttribute("y", String(route.mid.y - 8));
       label.setAttribute("class", "edge-label");
+      label.setAttribute("text-anchor", svgAnchorForAlign(align));
+      label.setAttribute("font-weight", isTextBold(edge) ? "700" : "500");
+      label.setAttribute("font-style", isTextItalic(edge) ? "italic" : "normal");
+      if (edge.titleLink) label.setAttribute("text-decoration", "underline");
       label.dataset.edgeId = edge.id;
       label.textContent = edge.label;
       fragment.appendChild(label);
     }
     addPathSegments(route.points, occupied);
+  }
+
+  const draftPoints = computeLinkDraftRoute();
+  if (draftPoints && draftPoints.length >= 2) {
+    const draft = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    draft.setAttribute("d", edgePathDataForShape(draftPoints, normalizeEdgeShape(state.defaultEdgeShape)));
+    draft.setAttribute("fill", "none");
+    draft.setAttribute("stroke", state.defaultEdgeColor || "#6d86b8");
+    draft.setAttribute("stroke-width", "2");
+    draft.setAttribute("stroke-dasharray", "7 5");
+    draft.setAttribute("stroke-opacity", "0.45");
+    draft.setAttribute("class", "edge-draft");
+    fragment.appendChild(draft);
   }
 
   state.edgeRouteCache = routeCache;
@@ -1501,18 +3118,49 @@ function renderControls() {
   const hasNodes = state.graph.nodes.length > 0;
   const snapshot = history.snapshot();
 
-  if (!nodeSelected) {
+  if (nodeSelected) {
+    const node = getNode(state.selectedNodeId);
+    if (node) {
+      appliquerStyleParDefaut(node);
+      els.titleInput.value = node.title || "";
+      els.textColorInput.value = node.textColor || "#1f2230";
+      els.colorInput.value = node.color || "#ffd166";
+      els.borderColorInput.value = node.borderColor || "#5c647f";
+      els.borderWidthInput.value = String(Number.isFinite(node.borderWidth) ? node.borderWidth : 2);
+      els.radiusInput.value = String(Number.isFinite(node.radius) ? node.radius : 14);
+      if (els.nodeTitleLinkInput) {
+        els.nodeTitleLinkInput.value = node.titleLink || "";
+      }
+      if (els.nodeTitleCenterBtn) {
+        const active = getTextAlignForNode(node) === "center";
+        els.nodeTitleCenterBtn.classList.toggle("is-active", active);
+      }
+      if (els.nodeTitleBoldBtn) {
+        els.nodeTitleBoldBtn.classList.toggle("is-active", isTextBold(node));
+      }
+      if (els.nodeTitleItalicBtn) {
+        els.nodeTitleItalicBtn.classList.toggle("is-active", isTextItalic(node));
+      }
+    }
+  } else {
     els.titleInput.value = "";
     els.textColorInput.value = "#1f2230";
     els.colorInput.value = "#ffd166";
     els.borderColorInput.value = "#5c647f";
     els.borderWidthInput.value = "2";
     els.radiusInput.value = "14";
+    if (els.nodeTitleLinkInput) els.nodeTitleLinkInput.value = "";
+    if (els.nodeTitleCenterBtn) els.nodeTitleCenterBtn.classList.remove("is-active");
+    if (els.nodeTitleBoldBtn) els.nodeTitleBoldBtn.classList.remove("is-active");
+    if (els.nodeTitleItalicBtn) els.nodeTitleItalicBtn.classList.remove("is-active");
   }
 
   els.undoBtn.disabled = !history.canUndo();
   els.redoBtn.disabled = !history.canRedo();
-  els.addChildBtn.disabled = !nodeSelected;
+  const selectedNode = nodeSelected ? getNode(state.selectedNodeId) : null;
+  const canAddChild = Boolean(selectedNode) && !isPostitNode(selectedNode);
+  els.addChildBtn.disabled = !canAddChild;
+  if (els.qaAddChildBtn) els.qaAddChildBtn.disabled = !canAddChild;
   els.deleteEdgeBtn.disabled = !edgeSelected;
   els.edgeTitleInput.disabled = !edgeSelected;
   els.edgeColorInput.disabled = !edgeSelected;
@@ -1524,9 +3172,57 @@ function renderControls() {
   els.borderColorInput.disabled = !nodeSelected;
   els.borderWidthInput.disabled = !nodeSelected;
   els.radiusInput.disabled = !nodeSelected;
+  if (els.nodeTitleCenterBtn) els.nodeTitleCenterBtn.disabled = !nodeSelected;
+  if (els.nodeTitleBoldBtn) els.nodeTitleBoldBtn.disabled = !nodeSelected;
+  if (els.nodeTitleItalicBtn) els.nodeTitleItalicBtn.disabled = !nodeSelected;
+  if (els.nodeTitleLinkInput) els.nodeTitleLinkInput.disabled = !nodeSelected;
 
-  if (els.edgeShapeGlobalSelect) {
-    els.edgeShapeGlobalSelect.value = normalizeEdgeShape(state.defaultEdgeShape);
+  if (edgeSelected) {
+    const edge = getEdge(state.selectedEdgeId);
+    if (edge) {
+      appliquerTexteLienParDefaut(edge);
+      els.edgeTitleInput.value = edge.label || "";
+      els.edgeColorInput.value = getEdgeColor(edge);
+      els.edgeStyleSelect.value = getEdgeStyle(edge);
+      if (els.edgeTitleLinkInput) {
+        els.edgeTitleLinkInput.value = edge.titleLink || "";
+      }
+      if (els.edgeTitleCenterBtn) {
+        els.edgeTitleCenterBtn.classList.toggle("is-active", getTextAlignForEdge(edge) === "center");
+      }
+      if (els.edgeTitleBoldBtn) {
+        els.edgeTitleBoldBtn.classList.toggle("is-active", isTextBold(edge));
+      }
+      if (els.edgeTitleItalicBtn) {
+        els.edgeTitleItalicBtn.classList.toggle("is-active", isTextItalic(edge));
+      }
+    }
+  } else {
+    if (els.edgeTitleLinkInput) els.edgeTitleLinkInput.value = "";
+    if (els.edgeTitleCenterBtn) els.edgeTitleCenterBtn.classList.remove("is-active");
+    if (els.edgeTitleBoldBtn) els.edgeTitleBoldBtn.classList.remove("is-active");
+    if (els.edgeTitleItalicBtn) els.edgeTitleItalicBtn.classList.remove("is-active");
+  }
+  if (els.edgeTitleCenterBtn) els.edgeTitleCenterBtn.disabled = !edgeSelected;
+  if (els.edgeTitleBoldBtn) els.edgeTitleBoldBtn.disabled = !edgeSelected;
+  if (els.edgeTitleItalicBtn) els.edgeTitleItalicBtn.disabled = !edgeSelected;
+  if (els.edgeTitleLinkInput) els.edgeTitleLinkInput.disabled = !edgeSelected;
+
+  const currentShape = normalizeEdgeShape(state.defaultEdgeShape);
+  if (els.edgeShapeGeoBtn) {
+    const isActive = currentShape === "geometrique";
+    els.edgeShapeGeoBtn.classList.toggle("is-active", isActive);
+    els.edgeShapeGeoBtn.setAttribute("aria-pressed", isActive ? "true" : "false");
+  }
+  if (els.edgeShapeRoundBtn) {
+    const isActive = currentShape === "arrondi";
+    els.edgeShapeRoundBtn.classList.toggle("is-active", isActive);
+    els.edgeShapeRoundBtn.setAttribute("aria-pressed", isActive ? "true" : "false");
+  }
+  if (els.edgeShapeCurveBtn) {
+    const isActive = currentShape === "courbe";
+    els.edgeShapeCurveBtn.classList.toggle("is-active", isActive);
+    els.edgeShapeCurveBtn.setAttribute("aria-pressed", isActive ? "true" : "false");
   }
 
   els.undoBtn.title = `Annuler (${snapshot.undo})`;
@@ -1545,13 +3241,13 @@ function renderControls() {
 
 function renderQuickActions() {
   const node = state.selectedNodeId ? getNode(state.selectedNodeId) : null;
-  const show = Boolean(node) && !state.selectedEdgeId && !state.inlineEditNodeId;
+  const show = Boolean(node) && !isPostitNode(node) && !state.selectedEdgeId && !state.inlineEditNodeId;
   els.quickActions.hidden = !show;
   if (!show) return;
 
   const mapSize = computeMapSize();
-  const menuWidth = 290;
-  let x = node.x + core.NODE_WIDTH + 14;
+  const menuWidth = 312;
+  let x = node.x + getNodeWidth(node) + 14;
   let y = node.y - 6;
   if (x + menuWidth > mapSize.width - 10) {
     x = node.x - menuWidth - 14;
@@ -1559,6 +3255,9 @@ function renderQuickActions() {
   if (y < 10) y = 10;
   els.quickActions.style.left = `${Math.max(10, x)}px`;
   els.quickActions.style.top = `${y}px`;
+  const invZoom = 1 / Math.max(0.25, state.viewport.zoom || 1);
+  els.quickActions.style.transformOrigin = "top left";
+  els.quickActions.style.transform = `scale(${invZoom})`;
 }
 
 function renderEdgeQuickActions() {
@@ -1571,7 +3270,7 @@ function renderEdgeQuickActions() {
   const midX = route.mid.x;
   const midY = route.mid.y;
   const mapSize = computeMapSize();
-  const menuWidth = 280;
+  const menuWidth = 312;
   let x = midX - menuWidth / 2;
   let y = midY + 14;
   if (x < 10) x = 10;
@@ -1579,10 +3278,37 @@ function renderEdgeQuickActions() {
   if (y < 10) y = 10;
   els.edgeQuickActions.style.left = `${x}px`;
   els.edgeQuickActions.style.top = `${y}px`;
+  const invZoom = 1 / Math.max(0.25, state.viewport.zoom || 1);
+  els.edgeQuickActions.style.transformOrigin = "top left";
+  els.edgeQuickActions.style.transform = `scale(${invZoom})`;
 }
 
 function renderViewport() {
   els.stage.style.transform = `translate(${state.viewport.x}px, ${state.viewport.y}px) scale(${state.viewport.zoom})`;
+}
+
+function maybeAutoPanWhileDragging(clientX, clientY) {
+  const rect = els.canvas.getBoundingClientRect();
+  const margin = 56;
+  const speed = 14;
+  let moved = false;
+  if (clientX < rect.left + margin) {
+    state.viewport.x += speed;
+    moved = true;
+  } else if (clientX > rect.right - margin) {
+    state.viewport.x -= speed;
+    moved = true;
+  }
+  if (clientY < rect.top + margin) {
+    state.viewport.y += speed;
+    moved = true;
+  } else if (clientY > rect.bottom - margin) {
+    state.viewport.y -= speed;
+    moved = true;
+  }
+  if (moved) {
+    renderViewport();
+  }
 }
 
 function render() {
@@ -1597,19 +3323,44 @@ function render() {
 function onNodePointerDown(event) {
   const nodeEl = event.target.closest(".node");
   if (!nodeEl) return;
-  if (event.target.closest(".node-handle")) return;
-  if (event.target.closest("[data-inline-editor='true']")) return;
-  if (state.spacePressed) return;
-  event.preventDefault();
-
   const nodeId = nodeEl.dataset.id;
   const node = getNode(nodeId);
   if (!node) return;
+  const resizeHandle = event.target.closest(".postit-resize-handle");
+  if (resizeHandle) {
+    if (!isPostitNode(node)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    state.resizingPostitId = nodeId;
+    state.resizePostitStartClient = { x: event.clientX, y: event.clientY };
+    state.resizePostitStartSize = { width: getNodeWidth(node), height: getNodeHeight(node) };
+    nodeEl.setPointerCapture(event.pointerId);
+    return;
+  }
+  if (event.target.closest("[data-inline-editor='true'], [data-postit-editor='true']")) return;
+  const onPostitGrip = Boolean(event.target.closest(".postit-grip"));
+  if (isPostitNode(node) && !onPostitGrip) {
+    selectNode(nodeId);
+    return;
+  }
+  if (event.target.closest(".node-handle")) return;
+  if (state.spacePressed) return;
+  if (!isPostitNode(node)) {
+    event.preventDefault();
+  }
+
+  if (isNodeLockedByOther(nodeId)) {
+    const owner = getLockOwner(nodeId);
+    setStatus(`Nœud verrouillé par ${owner ? owner.name : "un autre membre"}`, true);
+    return;
+  }
 
   selectNode(nodeId);
 
   const world = toWorld(event.clientX, event.clientY);
   state.draggingNodeId = nodeId;
+  state.dragActivated = isPostitNode(node) && onPostitGrip;
+  state.dragStartClient = { x: event.clientX, y: event.clientY };
   state.dragOffset.x = world.x - node.x;
   state.dragOffset.y = world.y - node.y;
 
@@ -1617,24 +3368,81 @@ function onNodePointerDown(event) {
 }
 
 function onNodePointerMove(event) {
+  if (state.linkDraft) {
+    state.linkDraftCursor = toWorld(event.clientX, event.clientY);
+    requestRender();
+  }
+  if (state.resizingPostitId) {
+    const node = getNode(state.resizingPostitId);
+    if (!node || !state.resizePostitStartClient || !state.resizePostitStartSize) return;
+    const zoom = Math.max(0.1, state.viewport.zoom || 1);
+    const dx = (event.clientX - state.resizePostitStartClient.x) / zoom;
+    const dy = (event.clientY - state.resizePostitStartClient.y) / zoom;
+    node.width = Math.max(160, Math.min(760, Math.round(state.resizePostitStartSize.width + dx)));
+    node.height = Math.max(80, Math.min(720, Math.round(state.resizePostitStartSize.height + dy)));
+    requestRender();
+    return;
+  }
   if (!state.draggingNodeId) return;
   const nodeId = state.draggingNodeId;
   const node = getNode(nodeId);
   if (!node) return;
+  if (isPostitNode(node)) {
+    maybeAutoPanWhileDragging(event.clientX, event.clientY);
+  }
+
+  if (!state.dragActivated) {
+    const start = state.dragStartClient;
+    const dx = start ? event.clientX - start.x : 0;
+    const dy = start ? event.clientY - start.y : 0;
+    const threshold = isPostitNode(node) ? 2 : NODE_DRAG_START_PX;
+    if (Math.hypot(dx, dy) < threshold) {
+      return;
+    }
+    state.dragActivated = true;
+  }
 
   const world = toWorld(event.clientX, event.clientY);
-  const rawX = Math.max(20, world.x - state.dragOffset.x);
-  const rawY = Math.max(20, world.y - state.dragOffset.y);
-  const snapped = magnetiserPositionNoeud(nodeId, rawX, rawY);
-  node.x = snapped.x;
-  node.y = snapped.y;
+  const rawX = isPostitNode(node) ? world.x - state.dragOffset.x : Math.max(20, world.x - state.dragOffset.x);
+  const rawY = isPostitNode(node) ? world.y - state.dragOffset.y : Math.max(20, world.y - state.dragOffset.y);
+  if (isPostitNode(node)) {
+    node.x = rawX;
+    node.y = rawY;
+    const el = els.nodes.querySelector(`.node[data-id="${nodeId}"]`);
+    if (el) {
+      el.style.left = `${rawX}px`;
+      el.style.top = `${rawY}px`;
+    }
+    return;
+  } else {
+    const snapped = magnetiserPositionNoeud(nodeId, rawX, rawY);
+    node.x = snapped.x;
+    node.y = snapped.y;
+  }
   requestRender();
 }
 
 function onNodePointerUp() {
+  if (state.resizingPostitId) {
+    const resizedId = state.resizingPostitId;
+    state.resizingPostitId = null;
+    state.resizePostitStartClient = null;
+    state.resizePostitStartSize = null;
+    commit(() => {
+      const node = getNode(resizedId);
+      if (!node) return;
+      node.width = getNodeWidth(node);
+      node.height = getNodeHeight(node);
+    }, "Post-it redimensionné");
+    return;
+  }
   if (!state.draggingNodeId) return;
   const movedId = state.draggingNodeId;
+  const moved = state.dragActivated;
   state.draggingNodeId = null;
+  state.dragActivated = false;
+  state.dragStartClient = null;
+  if (!moved) return;
   commit(() => {
     const node = getNode(movedId);
     if (node) {
@@ -1647,7 +3455,13 @@ function onNodePointerUp() {
 function startInlineEdit(nodeId) {
   const node = getNode(nodeId);
   if (!node) return;
+  if (isNodeLockedByOther(nodeId)) {
+    const owner = getLockOwner(nodeId);
+    setStatus(`Nœud verrouillé par ${owner ? owner.name : "un autre membre"}`, true);
+    return;
+  }
   state.inlineEditNodeId = nodeId;
+  state.inlineEditIsPostit = isPostitNode(node);
   state.selectedNodeId = nodeId;
   state.selectedEdgeId = null;
   requestRender();
@@ -1657,25 +3471,48 @@ function startInlineEdit(nodeId) {
     const input = Array.from(allInputs).find((el) => el.dataset.nodeId === nodeId);
     if (!input) return;
     input.focus();
-    input.select();
+    if (typeof input.select === "function") input.select();
   });
 }
 
-function commitInlineEdit(nodeId, nextTitle) {
-  const normalized = (nextTitle || "").trim() || "Nœud";
+function commitInlineEdit(nodeId, nextTitle, options = {}) {
+  const node = getNode(nodeId);
+  const isPostit = isPostitNode(node);
+  const normalized = isPostit
+    ? String(nextTitle || "").replace(/\r/g, "").trim() || "Commentaire"
+    : (nextTitle || "").trim() || "Nœud";
   const changed = commit(() => {
-    const node = getNode(nodeId);
-    if (node) node.title = normalized;
+    const target = getNode(nodeId);
+    if (target) target.title = normalized;
+    if (target && isPostit) {
+      const width = Number(options.width);
+      const height = Number(options.height);
+      if (Number.isFinite(width)) target.width = Math.max(160, Math.min(760, Math.round(width)));
+      if (Number.isFinite(height)) target.height = Math.max(80, Math.min(720, Math.round(height)));
+    }
   }, "Titre du nœud mis à jour");
   state.inlineEditNodeId = null;
+  state.inlineEditIsPostit = false;
   if (!changed) {
     requestRender();
   }
 }
 
+function postitSizeFromEditor(input) {
+  const nodeEl = input && typeof input.closest === "function" ? input.closest(".node") : null;
+  if (!nodeEl) return null;
+  const styles = window.getComputedStyle(nodeEl);
+  const padX = parseFloat(styles.paddingLeft || "0") + parseFloat(styles.paddingRight || "0");
+  const padY = parseFloat(styles.paddingTop || "0") + parseFloat(styles.paddingBottom || "0");
+  const width = Math.max(160, Math.round(input.offsetWidth + padX));
+  const height = Math.max(80, Math.round(input.offsetHeight + padY));
+  return { width, height };
+}
+
 function cancelInlineEdit() {
   if (!state.inlineEditNodeId) return;
   state.inlineEditNodeId = null;
+  state.inlineEditIsPostit = false;
   requestRender();
 }
 
@@ -1707,6 +3544,10 @@ function onCanvasPointerDown(event) {
 }
 
 function onCanvasPointerMove(event) {
+  if (state.linkDraft) {
+    state.linkDraftCursor = toWorld(event.clientX, event.clientY);
+    requestRender();
+  }
   if (!state.isPanning || !state.panStart) return;
   state.viewport.x = state.panStart.viewportX + (event.clientX - state.panStart.x);
   state.viewport.y = state.panStart.viewportY + (event.clientY - state.panStart.y);
@@ -1738,6 +3579,7 @@ function onCanvasWheel(event) {
 }
 
 function onKeyDown(event) {
+  if (state.appLocked) return;
   const activeTag = document.activeElement ? document.activeElement.tagName : "";
   const inInput = ["INPUT", "TEXTAREA", "SELECT"].includes(activeTag);
 
@@ -1798,6 +3640,12 @@ function onKeyDown(event) {
     return;
   }
 
+  if (event.key.toLowerCase() === "p") {
+    event.preventDefault();
+    createPostitAtCenter();
+    return;
+  }
+
   if (event.key === "Tab") {
     event.preventDefault();
     addChildToSelected();
@@ -1816,53 +3664,103 @@ function onKeyUp(event) {
   }
 }
 
-function boot() {
+async function boot() {
   closeExportModal();
-  const raw = localStorage.getItem(STORAGE_KEY);
-  let loaded = false;
+  const cfg = cloudConfig();
+  state.cloudSyncEnabled = cfg.enabled;
+  state.cloudSyncWorkspace = cfg.workspace;
+  const identity = ensureCollaboratorIdentity();
+  state.realtime.clientId = identity.id;
+  state.realtime.clientName = identity.name;
+  state.realtime.enabled = cfg.enabled;
+  updatePresenceBar();
 
-  if (raw) {
+  if (state.cloudSyncEnabled) {
     try {
-      const parsed = JSON.parse(raw);
-      const validated = core.validateAndNormalizeData(parsed);
-      if (validated.ok) {
-        state.graph = validated.data;
-        loaded = true;
-      }
+      await syncCloudToLocal();
     } catch {
-      loaded = false;
+      setStatus("Cloud indisponible, mode local actif", true);
     }
   }
 
-  if (!loaded) {
-    state.graph = {
-      nodes: [{ id: "1", x: 180, y: 140, title: "Projet", color: "#ffd166", parentId: null }],
-      edges: [],
-      nextId: 2,
-    };
+  let projects = await listProjectsFromDb();
+
+  if (!projects.length) {
+    let seedGraph = createDefaultGraph();
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        const validated = core.validateAndNormalizeData(parsed);
+        if (validated.ok) {
+          seedGraph = validated.data;
+        }
+      } catch {
+      }
+    }
+    const firstId = makeProjectId();
+    await putProjectToDb(toProjectRecord({
+      id: firstId,
+      name: "Projet 1",
+      graph: seedGraph,
+      preferredLayout: state.preferredLayout,
+      defaultEdgeShape: state.defaultEdgeShape,
+    }));
+    projects = await listProjectsFromDb();
   }
 
+  await refreshProjectsFromDb();
+  const requestedId = localStorage.getItem(ACTIVE_PROJECT_KEY);
+  let project = null;
+  if (requestedId) {
+    project = projects.find((row) => row.id === requestedId) || null;
+  }
+  if (!project) {
+    project = projects[0] || null;
+  }
+  if (project && loadProjectIntoState(project, "")) {
+    state.lastSavedHash = graphHash();
+    await joinRealtimeChannelForProject(state.currentProjectId);
+    return;
+  }
+
+  state.graph = createDefaultGraph();
+  resetRealtimeVersionState(state.graph);
   state.lastSavedHash = graphHash();
   state.defaultEdgeShape = deriveDefaultEdgeShapeFromGraph();
   state.selectedNodeId = null;
   state.selectedEdgeId = null;
+  refreshProjectUi();
   requestRender();
+  await joinRealtimeChannelForProject(state.currentProjectId);
 }
 
 els.nodes.addEventListener("click", (event) => {
+  if (event.target.closest("[data-inline-editor='true'], [data-postit-editor='true']")) return;
   const nodeEl = event.target.closest(".node");
   if (!nodeEl) return;
   event.stopPropagation();
+  if ((event.metaKey || event.ctrlKey) && event.target.closest(".node-title")) {
+    const node = getNode(nodeEl.dataset.id);
+    if (node && isValidHttpLink(node.titleLink)) {
+      window.open(node.titleLink, "_blank", "noopener,noreferrer");
+      return;
+    }
+  }
   if (state.linkDraft) {
     finishLinkDraft(nodeEl.dataset.id);
     return;
   }
+  if (state.inlineEditNodeId === nodeEl.dataset.id) return;
   onNodeClick(nodeEl.dataset.id);
 });
 
 els.nodes.addEventListener("dblclick", (event) => {
+  if (event.target.closest("[data-inline-editor='true']")) return;
   const nodeEl = event.target.closest(".node");
   if (!nodeEl) return;
+  const node = getNode(nodeEl.dataset.id);
+  if (node && isPostitNode(node)) return;
   event.preventDefault();
   event.stopPropagation();
   startInlineEdit(nodeEl.dataset.id);
@@ -1871,10 +3769,22 @@ els.nodes.addEventListener("dblclick", (event) => {
 els.nodes.addEventListener("keydown", (event) => {
   const input = event.target.closest("[data-inline-editor='true']");
   if (!input) return;
+  const nodeId = input.dataset.nodeId;
+  const node = nodeId ? getNode(nodeId) : null;
+  const isPostit = isPostitNode(node);
 
-  if (event.key === "Enter") {
+  if (!isPostit && event.key === "Enter") {
     event.preventDefault();
     commitInlineEdit(input.dataset.nodeId, input.value);
+    return;
+  }
+  if (isPostit && event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault();
+    const size = postitSizeFromEditor(input) || {};
+    commitInlineEdit(input.dataset.nodeId, input.value, {
+      width: size.width,
+      height: size.height,
+    });
     return;
   }
   if (event.key === "Escape") {
@@ -1886,18 +3796,59 @@ els.nodes.addEventListener("keydown", (event) => {
 els.nodes.addEventListener("blur", (event) => {
   const input = event.target.closest("[data-inline-editor='true']");
   if (!input) return;
-  commitInlineEdit(input.dataset.nodeId, input.value);
+  const size = postitSizeFromEditor(input) || {};
+  commitInlineEdit(input.dataset.nodeId, input.value, {
+    width: size.width,
+    height: size.height,
+  });
+}, true);
+
+els.nodes.addEventListener("input", (event) => {
+  const editor = event.target.closest("[data-postit-editor='true']");
+  if (!editor) return;
+  const nodeId = editor.dataset.nodeId;
+  const node = nodeId ? getNode(nodeId) : null;
+  if (!node || !isPostitNode(node)) return;
+  node.title = String(editor.value || "").slice(0, 4000);
+});
+
+function syncPostitDimensionsFromDom(editor) {
+  if (!editor) return;
+  const nodeId = editor.dataset.nodeId;
+  const node = nodeId ? getNode(nodeId) : null;
+  const nodeEl = editor.closest(".node");
+  if (!node || !nodeEl || !isPostitNode(node)) return;
+  node.width = Math.max(160, Math.min(760, Math.round(nodeEl.offsetWidth)));
+  node.height = Math.max(80, Math.min(720, Math.round(nodeEl.offsetHeight)));
+}
+
+els.nodes.addEventListener("pointerup", (event) => {
+  const editor = event.target.closest("[data-postit-editor='true']");
+  if (!editor) return;
+  syncPostitDimensionsFromDom(editor);
+});
+
+els.nodes.addEventListener("blur", (event) => {
+  const editor = event.target.closest("[data-postit-editor='true']");
+  if (!editor) return;
+  syncPostitDimensionsFromDom(editor);
+  saveNow();
 }, true);
 
 els.nodes.addEventListener("pointerdown", onNodePointerDown);
 els.nodes.addEventListener("pointermove", onNodePointerMove);
 els.nodes.addEventListener("pointerup", onNodePointerUp);
 els.nodes.addEventListener("pointercancel", onNodePointerUp);
+window.addEventListener("pointermove", onNodePointerMove);
+window.addEventListener("pointerup", onNodePointerUp);
+window.addEventListener("pointercancel", onNodePointerUp);
 els.nodes.addEventListener("pointerdown", (event) => {
   const handle = event.target.closest(".node-handle");
   if (!handle) return;
   const nodeEl = handle.closest(".node");
   if (!nodeEl) return;
+  const node = getNode(nodeEl.dataset.id);
+  if (!node || isPostitNode(node)) return;
   event.preventDefault();
   event.stopPropagation();
   if (!state.linkDraft) {
@@ -1914,6 +3865,13 @@ els.nodes.addEventListener("pointerdown", (event) => {
 function selectEdgeFromEvent(event) {
   const edgeEl = event.target.closest(".edge-hit, .edge-path, .edge-label");
   if (!edgeEl || !edgeEl.dataset.edgeId) return;
+  if ((event.metaKey || event.ctrlKey) && event.target.closest(".edge-label")) {
+    const edge = getEdge(edgeEl.dataset.edgeId);
+    if (edge && isValidHttpLink(edge.titleLink)) {
+      window.open(edge.titleLink, "_blank", "noopener,noreferrer");
+      return;
+    }
+  }
   event.preventDefault();
   event.stopPropagation();
   selectEdge(edgeEl.dataset.edgeId);
@@ -1929,6 +3887,9 @@ els.canvas.addEventListener("wheel", onCanvasWheel, { passive: false });
 
 window.addEventListener("keydown", onKeyDown);
 window.addEventListener("keyup", onKeyUp);
+window.addEventListener("beforeunload", () => {
+  void leaveRealtimeChannel();
+});
 
 els.undoBtn.addEventListener("click", undo);
 els.redoBtn.addEventListener("click", redo);
@@ -1940,6 +3901,11 @@ els.addRootBtn.addEventListener("click", () => {
 els.addChildBtn.addEventListener("click", () => {
   addChildToSelected();
 });
+if (els.addPostitBtn) {
+  els.addPostitBtn.addEventListener("click", () => {
+    createPostitAtCenter();
+  });
+}
 
 els.deleteBtn.addEventListener("click", deleteSelected);
 els.clearBtn.addEventListener("click", clearMap);
@@ -1953,6 +3919,51 @@ els.titleInput.addEventListener("input", (event) => {
     if (node) node.title = value || "Nœud";
   }, "Titre du nœud mis à jour");
 });
+
+if (els.nodeTitleCenterBtn) {
+  els.nodeTitleCenterBtn.addEventListener("click", () => {
+    if (!state.selectedNodeId) return;
+    commit(() => {
+      const node = getNode(state.selectedNodeId);
+      if (!node) return;
+      node.textAlign = getTextAlignForNode(node) === "center" ? "left" : "center";
+    }, "Alignement du titre mis à jour");
+  });
+}
+
+if (els.nodeTitleBoldBtn) {
+  els.nodeTitleBoldBtn.addEventListener("click", () => {
+    if (!state.selectedNodeId) return;
+    commit(() => {
+      const node = getNode(state.selectedNodeId);
+      if (!node) return;
+      node.textBold = !isTextBold(node);
+    }, "Gras du titre mis à jour");
+  });
+}
+
+if (els.nodeTitleItalicBtn) {
+  els.nodeTitleItalicBtn.addEventListener("click", () => {
+    if (!state.selectedNodeId) return;
+    commit(() => {
+      const node = getNode(state.selectedNodeId);
+      if (!node) return;
+      node.textItalic = !isTextItalic(node);
+    }, "Italique du titre mis à jour");
+  });
+}
+
+if (els.nodeTitleLinkInput) {
+  els.nodeTitleLinkInput.addEventListener("change", (event) => {
+    if (!state.selectedNodeId) return;
+    const value = normalizeTitleLink(event.target.value);
+    commit(() => {
+      const node = getNode(state.selectedNodeId);
+      if (!node) return;
+      node.titleLink = value;
+    }, "Lien du titre du nœud mis à jour");
+  });
+}
 
 els.colorInput.addEventListener("input", (event) => {
   if (!state.selectedNodeId) return;
@@ -2026,21 +4037,84 @@ els.edgeStyleSelect.addEventListener("change", (event) => {
   }, "Style du lien mis à jour");
 });
 
-if (els.edgeShapeGlobalSelect) {
-  els.edgeShapeGlobalSelect.addEventListener("change", (event) => {
-    const nextShape = normalizeEdgeShape(event.target.value);
-    state.defaultEdgeShape = nextShape;
-    if (!state.graph.edges.length) {
-      requestRender();
-      return;
-    }
+if (els.edgeTitleCenterBtn) {
+  els.edgeTitleCenterBtn.addEventListener("click", () => {
+    if (!state.selectedEdgeId) return;
     commit(() => {
-      for (const edge of state.graph.edges) {
-        edge.shape = nextShape;
-      }
-    }, "Forme globale des liens mise à jour");
+      const edge = getEdge(state.selectedEdgeId);
+      if (!edge) return;
+      edge.textAlign = getTextAlignForEdge(edge) === "center" ? "left" : "center";
+    }, "Alignement du titre du lien mis à jour");
   });
 }
+
+if (els.edgeTitleBoldBtn) {
+  els.edgeTitleBoldBtn.addEventListener("click", () => {
+    if (!state.selectedEdgeId) return;
+    commit(() => {
+      const edge = getEdge(state.selectedEdgeId);
+      if (!edge) return;
+      edge.textBold = !isTextBold(edge);
+    }, "Gras du titre du lien mis à jour");
+  });
+}
+
+if (els.edgeTitleItalicBtn) {
+  els.edgeTitleItalicBtn.addEventListener("click", () => {
+    if (!state.selectedEdgeId) return;
+    commit(() => {
+      const edge = getEdge(state.selectedEdgeId);
+      if (!edge) return;
+      edge.textItalic = !isTextItalic(edge);
+    }, "Italique du titre du lien mis à jour");
+  });
+}
+
+if (els.edgeTitleLinkInput) {
+  els.edgeTitleLinkInput.addEventListener("change", (event) => {
+    if (!state.selectedEdgeId) return;
+    const value = normalizeTitleLink(event.target.value);
+    commit(() => {
+      const edge = getEdge(state.selectedEdgeId);
+      if (!edge) return;
+      edge.titleLink = value;
+    }, "Lien du titre du lien mis à jour");
+  });
+}
+
+function applyGlobalEdgeShape(nextShape) {
+  const normalized = normalizeEdgeShape(nextShape);
+  state.defaultEdgeShape = normalized;
+  state.activeTraitPreset = "personnalise";
+  if (!state.graph.edges.length) {
+    requestRender();
+    return;
+  }
+  commit(() => {
+    for (const edge of state.graph.edges) {
+      edge.shape = normalized;
+    }
+  }, "Forme globale des liens mise à jour");
+}
+
+if (els.edgeShapeGeoBtn) {
+  els.edgeShapeGeoBtn.addEventListener("click", () => applyGlobalEdgeShape("geometrique"));
+}
+if (els.edgeShapeRoundBtn) {
+  els.edgeShapeRoundBtn.addEventListener("click", () => applyGlobalEdgeShape("arrondi"));
+}
+if (els.edgeShapeCurveBtn) {
+  els.edgeShapeCurveBtn.addEventListener("click", () => applyGlobalEdgeShape("courbe"));
+}
+
+if (els.edgeQuickActions) {
+  els.edgeQuickActions.addEventListener("click", (event) => {
+    const presetButton = event.target.closest("[data-edge-preset]");
+    if (!presetButton) return;
+    applyEdgePresetToSelected(presetButton.dataset.edgePreset);
+  });
+}
+
 
 els.layoutHorizontalBtn.addEventListener("click", () => runLayout("horizontal"));
 els.layoutVerticalBtn.addEventListener("click", () => runLayout("vertical"));
@@ -2070,12 +4144,6 @@ els.qaAddChildBtn.addEventListener("click", () => {
   addChildToSelected();
 });
 
-els.qaRenameBtn.addEventListener("click", () => {
-  if (state.selectedNodeId) {
-    startInlineEdit(state.selectedNodeId);
-  }
-});
-
 els.qaDeleteBtn.addEventListener("click", () => {
   deleteSelected();
 });
@@ -2090,6 +4158,114 @@ if (els.emptyCreateBtn) {
   els.emptyCreateBtn.addEventListener("click", createRootAtCenter);
 }
 
-window.setInterval(runAutosave, AUTOSAVE_INTERVAL_MS);
+if (els.projectSelect) {
+  els.projectSelect.addEventListener("change", async (event) => {
+    const nextId = event.target.value;
+    if (!nextId || nextId === state.currentProjectId) return;
+    try {
+      await persistCurrentProjectToDb();
+      const project = await getProjectFromDb(nextId);
+      if (!project || !loadProjectIntoState(project, `Projet "${project.name || "Sans nom"}" chargé`)) {
+        setStatus("Impossible de charger ce projet", true);
+        refreshProjectUi();
+        return;
+      }
+      await joinRealtimeChannelForProject(state.currentProjectId);
+    } catch {
+      setStatus("Erreur lors du changement de projet", true);
+      refreshProjectUi();
+    }
+  });
+}
 
-boot();
+if (els.projectNewBtn) {
+  els.projectNewBtn.addEventListener("click", async () => {
+    const proposed = window.prompt("Nom du nouveau projet", `Projet ${state.projects.length + 1}`);
+    if (proposed === null) return;
+    const name = proposed.trim() || `Projet ${state.projects.length + 1}`;
+    const id = makeProjectId();
+    try {
+      await persistCurrentProjectToDb();
+      const record = toProjectRecord({
+        id,
+        name,
+        graph: createDefaultGraph(),
+        preferredLayout: state.preferredLayout,
+        defaultEdgeShape: state.defaultEdgeShape,
+      });
+      await putProjectToDb(record);
+      if (state.cloudSyncEnabled) {
+        await upsertCloudProject(record);
+      }
+      await refreshProjectsFromDb();
+      loadProjectIntoState(record, `Projet "${name}" créé`);
+      await joinRealtimeChannelForProject(state.currentProjectId);
+    } catch {
+      setStatus("Création du projet impossible", true);
+    }
+  });
+}
+
+if (els.projectRenameBtn) {
+  els.projectRenameBtn.addEventListener("click", async () => {
+    if (!state.currentProjectId) return;
+    const proposed = window.prompt("Nouveau nom du projet", state.currentProjectName || "");
+    if (proposed === null) return;
+    const name = proposed.trim();
+    if (!name) {
+      setStatus("Nom de projet vide", true);
+      return;
+    }
+    try {
+      const row = await getProjectFromDb(state.currentProjectId);
+      if (!row) return;
+      row.name = name;
+      row.updatedAt = new Date().toISOString();
+      await putProjectToDb(row);
+      if (state.cloudSyncEnabled) {
+        await upsertCloudProject(row);
+      }
+      state.currentProjectName = name;
+      await refreshProjectsFromDb();
+      setStatus("Projet renommé", false);
+    } catch {
+      setStatus("Renommage impossible", true);
+    }
+  });
+}
+
+if (els.projectDeleteBtn) {
+  els.projectDeleteBtn.addEventListener("click", async () => {
+    if (!state.currentProjectId || state.projects.length <= 1) return;
+    const ok = window.confirm(`Supprimer le projet "${state.currentProjectName}" ?`);
+    if (!ok) return;
+    const deletedId = state.currentProjectId;
+    try {
+      await deleteProjectFromDb(deletedId);
+      if (state.cloudSyncEnabled) {
+        await deleteCloudProject(deletedId);
+      }
+      await refreshProjectsFromDb();
+      const fallbackId = state.projects[0] ? state.projects[0].id : null;
+      if (!fallbackId) return;
+      const fallback = await getProjectFromDb(fallbackId);
+      if (fallback) {
+        loadProjectIntoState(fallback, "Projet supprimé");
+        await joinRealtimeChannelForProject(state.currentProjectId);
+      }
+    } catch {
+      setStatus("Suppression impossible", true);
+    }
+  });
+}
+
+window.setInterval(runAutosave, AUTOSAVE_INTERVAL_MS);
+window.setInterval(() => {
+  void syncCloudFromCurrentState().catch(() => {});
+}, CLOUD_SYNC_INTERVAL_MS);
+
+ensurePasswordGate(() => {
+  void boot().catch(() => {
+    setStatus("Erreur d'initialisation", true);
+  });
+});

@@ -25,6 +25,35 @@
     return "geometrique";
   }
 
+  function normalizeTextAlign(value, fallback) {
+    if (value === "center" || value === "right") return value;
+    if (value === "left") return "left";
+    return fallback;
+  }
+
+  function normalizeTitleLink(value) {
+    if (typeof value !== "string") return "";
+    return value.trim().slice(0, 500);
+  }
+
+  function normalizeNodeKind(value) {
+    return value === "postit" ? "postit" : "node";
+  }
+
+  function normalizeNodeWidth(value, kind) {
+    const base = kind === "postit" ? 240 : NODE_WIDTH;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return base;
+    return Math.max(120, Math.min(760, Math.round(parsed)));
+  }
+
+  function normalizeNodeHeight(value, kind) {
+    const base = kind === "postit" ? 140 : NODE_HEIGHT;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return base;
+    return Math.max(56, Math.min(720, Math.round(parsed)));
+  }
+
   function buildNodeIndex(nodes) {
     const map = new Map();
     for (const node of nodes) {
@@ -97,16 +126,24 @@
         continue;
       }
 
+      const kind = normalizeNodeKind(raw.kind);
       nodes.push({
         id,
         x,
         y,
+        kind,
+        width: normalizeNodeWidth(raw.width, kind),
+        height: normalizeNodeHeight(raw.height, kind),
         title: typeof raw.title === "string" && raw.title.trim() ? raw.title.trim() : "Node",
         color: isHexColor(raw.color) ? raw.color : "#ffd166",
         textColor: isHexColor(raw.textColor) ? raw.textColor : "#1f2230",
         borderColor: isHexColor(raw.borderColor) ? raw.borderColor : "#5c647f",
         borderWidth: Number.isFinite(Number(raw.borderWidth)) ? Math.max(0, Math.min(8, Number(raw.borderWidth))) : 2,
         radius: Number.isFinite(Number(raw.radius)) ? Math.max(0, Math.min(28, Number(raw.radius))) : 14,
+        textAlign: normalizeTextAlign(raw.textAlign, "left"),
+        textBold: Boolean(raw.textBold),
+        textItalic: Boolean(raw.textItalic),
+        titleLink: normalizeTitleLink(raw.titleLink),
         parentId: raw.parentId ? String(raw.parentId) : null,
       });
     }
@@ -116,7 +153,7 @@
       if (node.parentId && !nodeIndex.has(node.parentId)) {
         errors.push(`Node '${node.id}' references unknown parent '${node.parentId}'.`);
       }
-      if (createsTreeCycle(nodes, node.id, node.parentId)) {
+      if (node.kind !== "postit" && createsTreeCycle(nodes, node.id, node.parentId)) {
         errors.push(`Node '${node.id}' introduces a parent cycle.`);
       }
     }
@@ -157,7 +194,20 @@
       const label = typeof raw.label === "string" ? raw.label.trim().slice(0, 80) : "";
       const style = normalizeEdgeStyle(raw.style);
       const shape = normalizeEdgeShape(raw.shape);
-      edges.push({ id, source, target, type, color, label, style, shape });
+      edges.push({
+        id,
+        source,
+        target,
+        type,
+        color,
+        label,
+        style,
+        shape,
+        textAlign: normalizeTextAlign(raw.textAlign, "center"),
+        textBold: Boolean(raw.textBold),
+        textItalic: Boolean(raw.textItalic),
+        titleLink: normalizeTitleLink(raw.titleLink),
+      });
     }
 
     for (const node of nodes) {
@@ -165,7 +215,7 @@
       const hasTreeEdge = edges.some(
         (edge) => edge.type === "tree" && edge.source === node.parentId && edge.target === node.id,
       );
-      if (!hasTreeEdge) {
+      if (!hasTreeEdge && node.kind !== "postit") {
         edges.push({
           id: `tree-${node.parentId}-${node.id}`,
           source: node.parentId,
@@ -175,6 +225,10 @@
           label: "",
           style: "solid",
           shape: "geometrique",
+          textAlign: "center",
+          textBold: false,
+          textItalic: false,
+          titleLink: "",
         });
       }
     }
@@ -224,8 +278,10 @@
     for (const node of picked) {
       minX = Math.min(minX, node.x);
       minY = Math.min(minY, node.y);
-      maxX = Math.max(maxX, node.x + NODE_WIDTH);
-      maxY = Math.max(maxY, node.y + NODE_HEIGHT);
+      const w = normalizeNodeWidth(node.width, node.kind);
+      const h = normalizeNodeHeight(node.height, node.kind);
+      maxX = Math.max(maxX, node.x + w);
+      maxY = Math.max(maxY, node.y + h);
     }
 
     return {
@@ -238,7 +294,9 @@
 
   function layoutGraph(graph, mode) {
     const next = cloneGraph(graph);
-    const nodes = next.nodes;
+    const allNodes = next.nodes;
+    if (allNodes.length === 0) return next;
+    const nodes = allNodes.filter((node) => normalizeNodeKind(node.kind) !== "postit");
     if (nodes.length === 0) return next;
 
     const nodeIndex = buildNodeIndex(nodes);
@@ -311,6 +369,46 @@
         const rootId = roots[i];
         place(rootId, 0, cursor);
         cursor += subtreeSpan(rootId) + 1.1;
+      }
+
+      // Second pass: enforce strict centering of each parent on its children.
+      function centerParentOnChildren(nodeId) {
+        const kids = children.get(nodeId) || [];
+        for (let i = 0; i < kids.length; i += 1) {
+          centerParentOnChildren(kids[i]);
+        }
+        if (kids.length === 0) return;
+        const parent = nodeIndex.get(nodeId);
+        if (!parent) return;
+        const orderedKids = kids
+          .map((id) => nodeIndex.get(id))
+          .filter(Boolean)
+          .sort((a, b) => (mode === "horizontal" ? a.y - b.y : a.x - b.x));
+        if (orderedKids.length === 0) return;
+
+        const first = orderedKids[0];
+        const last = orderedKids[orderedKids.length - 1];
+        if (mode === "horizontal") {
+          const firstCenter = first.y + NODE_HEIGHT / 2;
+          const lastCenter = last.y + NODE_HEIGHT / 2;
+          const parentCenter = (firstCenter + lastCenter) / 2;
+          parent.y = parentCenter - NODE_HEIGHT / 2;
+        } else {
+          const firstCenter = first.x + NODE_WIDTH / 2;
+          const lastCenter = last.x + NODE_WIDTH / 2;
+          const parentCenter = (firstCenter + lastCenter) / 2;
+          parent.x = parentCenter - NODE_WIDTH / 2;
+        }
+      }
+
+      for (let i = 0; i < roots.length; i += 1) {
+        centerParentOnChildren(roots[i]);
+      }
+
+      // Pixel snapping for crisp rendering and stable hit-testing.
+      for (let i = 0; i < nodes.length; i += 1) {
+        nodes[i].x = Math.round(nodes[i].x);
+        nodes[i].y = Math.round(nodes[i].y);
       }
       return next;
     }
