@@ -305,6 +305,7 @@ select {
   font-family: inherit;
   font-size: 0.68rem;
   font-weight: 600;
+  border-radius: var(--pill-radius);
 }
 
 input[type="color"] {
