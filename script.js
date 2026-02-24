@@ -20,13 +20,56 @@ const EDGE_TURN_PENALTY = 18;
 const EDGE_SHORT_SEGMENT_PENALTY = 12;
 const NODE_DRAG_START_PX = 7;
 
+const persistUtils = window.MindMapPersistUtils || {};
+const projectStorageKey = (projectId) => (
+  typeof persistUtils.projectStorageKey === "function"
+    ? persistUtils.projectStorageKey(STORAGE_KEY, projectId)
+    : `${STORAGE_KEY}:${String(projectId || "default")}`
+);
+const persistDebugEnabled = () => (
+  typeof persistUtils.persistDebugEnabled === "function"
+    ? persistUtils.persistDebugEnabled()
+    : false
+);
+const countGroupedNodesInZones = (zones) => (
+  typeof persistUtils.countGroupedNodesInZones === "function"
+    ? persistUtils.countGroupedNodesInZones(zones)
+    : 0
+);
+const countGroupedNodesInGraph = (graph) => (
+  typeof persistUtils.countGroupedNodesInGraph === "function"
+    ? persistUtils.countGroupedNodesInGraph(graph)
+    : 0
+);
+const persistLog = (stage, payload = {}) => {
+  if (typeof persistUtils.persistLog === "function") {
+    persistUtils.persistLog(stage, payload);
+    return;
+  }
+  if (!persistDebugEnabled()) return;
+  try {
+    const now = new Date().toISOString();
+    console.info(`[persist][${now}][${stage}]`, payload);
+  } catch {
+  }
+};
+const groupUtils = window.MindMapGroupUtils || {};
+const groupStateUtils = window.MindMapGroupStateUtils || {};
+const groupActionsUtils = window.MindMapGroupActionsUtils || {};
+const groupInteractions = window.MindMapGroupInteractions || {};
+const groupRender = window.MindMapGroupRender || {};
+
 const state = {
   graph: {
     nodes: [],
     edges: [],
+    groups: [],
     nextId: 1,
   },
   selectedNodeId: null,
+  selectedNodeIds: [],
+  activeGroupId: "",
+  groupEditorGroupId: "",
   selectedEdgeId: null,
   linkMode: false,
   linkingFrom: null,
@@ -38,8 +81,12 @@ const state = {
     zoom: 1,
   },
   draggingNodeId: null,
+  draggingNodeIds: [],
+  draggingGroupId: null,
   dragActivated: false,
   dragStartClient: null,
+  dragStartWorld: null,
+  dragNodeStartPositions: null,
   dragOffset: { x: 0, y: 0 },
   resizingPostitId: null,
   resizePostitStartClient: null,
@@ -48,19 +95,26 @@ const state = {
   panStart: null,
   spacePressed: false,
   renderQueued: false,
+  rectSelectMode: false,
+  selectionRect: null,
   inlineEditNodeId: null,
   inlineEditIsPostit: false,
   lastAutosaveAt: null,
   lastSavedHash: "",
   preferredLayout: "horizontal",
   defaultEdgeShape: "arrondi",
-  defaultEdgeStyle: "dashed",
+  defaultEdgeStyle: "dotted",
   defaultEdgeColor: "#e15d44",
   activeTraitPreset: "signal",
   edgeRouteCache: new Map(),
   currentProjectId: null,
   currentProjectName: "",
   projects: [],
+  zones: [],
+  currentZoneId: null,
+  groupUiPrefs: new Map(),
+  persistInFlight: false,
+  persistPending: false,
   projectDbPromise: null,
   cloudSyncEnabled: false,
   cloudSyncWorkspace: "equipe-principale",
@@ -83,6 +137,7 @@ const state = {
     edgeTombstones: new Map(),
     lastRemoteAt: 0,
     lastSnapshotAt: 0,
+    joinedAt: 0,
   },
   appLocked: false,
 };
@@ -105,6 +160,7 @@ const els = {
   addChildBtn: document.getElementById("add-child-btn"),
   addPostitBtn: document.getElementById("add-postit-btn"),
   deleteBtn: document.getElementById("delete-btn"),
+  rectSelectBtn: document.getElementById("rect-select-btn"),
   clearBtn: document.getElementById("clear-btn"),
   titleInput: document.getElementById("node-title"),
   nodeTitleCenterBtn: document.getElementById("node-title-center-btn"),
@@ -122,6 +178,7 @@ const els = {
   edgeTitleBoldBtn: document.getElementById("edge-title-bold-btn"),
   edgeTitleItalicBtn: document.getElementById("edge-title-italic-btn"),
   edgeTitleLinkInput: document.getElementById("edge-title-link"),
+  edgeTitleBgColorInput: document.getElementById("edge-title-bg-color"),
   edgeColorInput: document.getElementById("edge-color"),
   edgeStyleSelect: document.getElementById("edge-style"),
   edgeQuickActionsEl: document.getElementById("edge-quick-actions"),
@@ -135,6 +192,10 @@ const els = {
   openImportBtn: document.getElementById("open-import-btn"),
   importJsonInput: document.getElementById("import-json-input"),
   exportRegion: document.getElementById("export-region"),
+  exportGroupsPicker: document.getElementById("export-groups-picker"),
+  exportGroupDropdown: document.getElementById("export-group-dropdown"),
+  exportGroupSummary: document.getElementById("export-group-summary"),
+  exportGroupList: document.getElementById("export-group-list"),
   exportScale: document.getElementById("export-scale"),
   exportDpi: document.getElementById("export-dpi"),
   exportTransparent: document.getElementById("export-transparent"),
@@ -149,6 +210,14 @@ const els = {
   qaDeleteBtn: document.getElementById("qa-delete"),
   emptyState: document.getElementById("empty-state"),
   emptyCreateBtn: document.getElementById("empty-create-btn"),
+  selectionRect: document.getElementById("selection-rect"),
+  groupQuickActions: document.getElementById("group-quick-actions"),
+  groupUngroupBtn: document.getElementById("group-ungroup-btn"),
+  groupCloseBtn: document.getElementById("group-close-btn"),
+  groupTitleInput: document.getElementById("group-title-input"),
+  groupColorInput: document.getElementById("group-color-input"),
+  groupLayer: document.getElementById("group-layer"),
+  groupTitleLayer: document.getElementById("group-title-layer"),
   projectSelect: document.getElementById("project-select"),
   projectNewBtn: document.getElementById("project-new-btn"),
   projectRenameBtn: document.getElementById("project-rename-btn"),
@@ -443,6 +512,7 @@ function createRealtimePatch(before, after) {
   return {
     nodes: { upserts: nodeUpserts, deletes: nodeDeletes },
     edges: { upserts: edgeUpserts, deletes: edgeDeletes },
+    groups: core.cloneGraph(after.groups || []),
     nextId: after.nextId,
     preferredLayout: state.preferredLayout || "horizontal",
     defaultEdgeShape: normalizeEdgeShape(state.defaultEdgeShape),
@@ -511,18 +581,29 @@ function applyRemoteSnapshot(payload) {
   if (snapshotAt <= state.realtime.lastSnapshotAt) return;
   const validated = core.validateAndNormalizeData(payload.graph);
   if (!validated.ok) return;
+  const incomingGrouped = countGroupedNodesInGraph(validated.data);
+  const currentGrouped = countGroupedNodesInGraph(state.graph);
+  const inJoinWindow = state.realtime.joinedAt > 0 && (Date.now() - state.realtime.joinedAt) < 12000;
+  if (inJoinWindow && incomingGrouped < currentGrouped) {
+    persistLog("remote-snapshot:ignored-regression", {
+      incomingGrouped,
+      currentGrouped,
+      at: snapshotAt,
+    });
+    return;
+  }
   state.realtime.lastSnapshotAt = snapshotAt;
   state.realtime.applyingRemote = true;
   history.clear();
   state.graph = validated.data;
-  state.preferredLayout = payload.preferredLayout || state.preferredLayout || "horizontal";
+  state.preferredLayout = normalizeLayoutMode(payload.preferredLayout || state.preferredLayout || "horizontal");
   state.defaultEdgeShape = normalizeEdgeShape(payload.defaultEdgeShape || deriveDefaultEdgeShapeFromGraph());
   if (Number.isFinite(payload.maxClock)) {
     state.realtime.clock = Math.max(state.realtime.clock, Number(payload.maxClock));
   }
   resetRealtimeVersionState(state.graph);
   state.selectedEdgeId = null;
-  if (state.selectedNodeId && !getNode(state.selectedNodeId)) state.selectedNodeId = null;
+  setSelectedNodeIds(getSelectedNodeIds());
   saveNow();
   requestRender();
   setStatus("Synchronisation en direct reçue", false);
@@ -597,17 +678,29 @@ function applyRemotePatch(payload) {
   const candidate = {
     nodes: Array.from(nodeMap.values()),
     edges: filteredEdges,
+    groups: Array.isArray(patch.groups) ? core.cloneGraph(patch.groups) : core.cloneGraph(state.graph.groups || []),
     nextId: Math.max(Number(state.graph.nextId) || 1, Number(patch.nextId) || 1),
   };
   const validated = core.validateAndNormalizeData(candidate);
   if (!validated.ok) return;
+  const incomingGrouped = countGroupedNodesInGraph(validated.data);
+  const currentGrouped = countGroupedNodesInGraph(state.graph);
+  const inJoinWindow = state.realtime.joinedAt > 0 && (Date.now() - state.realtime.joinedAt) < 12000;
+  if (inJoinWindow && incomingGrouped < currentGrouped) {
+    persistLog("remote-patch:ignored-regression", {
+      incomingGrouped,
+      currentGrouped,
+      at: Number(payload.at) || 0,
+    });
+    return;
+  }
 
   state.realtime.applyingRemote = true;
   state.graph = validated.data;
   state.realtime.lastRemoteAt = Math.max(state.realtime.lastRemoteAt, Number(payload.at) || Date.now());
-  state.preferredLayout = patch.preferredLayout || state.preferredLayout || "horizontal";
+  state.preferredLayout = normalizeLayoutMode(patch.preferredLayout || state.preferredLayout || "horizontal");
   state.defaultEdgeShape = normalizeEdgeShape(patch.defaultEdgeShape || state.defaultEdgeShape);
-  if (state.selectedNodeId && !getNode(state.selectedNodeId)) state.selectedNodeId = null;
+  setSelectedNodeIds(getSelectedNodeIds());
   if (state.selectedEdgeId && !getEdge(state.selectedEdgeId)) state.selectedEdgeId = null;
   saveNow();
   requestRender();
@@ -711,6 +804,7 @@ async function joinRealtimeChannelForProject(projectId) {
     channel.subscribe((status) => {
       if (status === "SUBSCRIBED") {
         state.realtime.connected = true;
+        state.realtime.joinedAt = Date.now();
         updatePresenceBar();
         trackRealtimePresence();
         channel.send({
@@ -888,6 +982,431 @@ function makeProjectId() {
   return `project-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 }
 
+function makeZoneId() {
+  if (window.crypto && typeof window.crypto.randomUUID === "function") {
+    return `zone-${window.crypto.randomUUID()}`;
+  }
+  return `zone-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+}
+
+function makeGroupId() {
+  if (window.crypto && typeof window.crypto.randomUUID === "function") {
+    return `grp-${window.crypto.randomUUID()}`;
+  }
+  return `grp-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+}
+
+function normalizeEdgeStyleValue(value) {
+  return value === "dashed" || value === "dotted" ? value : "solid";
+}
+
+function normalizeEdgeColorValue(value) {
+  return /^#[0-9a-fA-F]{6}$/.test(String(value || "")) ? String(value).toLowerCase() : "#e15d44";
+}
+
+function normalizeLayoutMode(value) {
+  if (value === "vertical" || value === "radial") return value;
+  return "horizontal";
+}
+
+function zoneFromRecord(input, fallbackName, fallbackLayout, fallbackShape, fallbackStyle, fallbackColor) {
+  if (!input || typeof input !== "object") return null;
+  const rawGraph = input.graph && typeof input.graph === "object" ? input.graph : input;
+  const validated = core.validateAndNormalizeData(rawGraph);
+  if (!validated.ok) return null;
+  return {
+    id: String(input.id || makeZoneId()),
+    name: String(input.name || fallbackName || "Zone").trim() || "Zone",
+    graph: validated.data,
+    preferredLayout: normalizeLayoutMode(String(input.preferredLayout || fallbackLayout || "horizontal")),
+    defaultEdgeShape: normalizeEdgeShape(input.defaultEdgeShape || fallbackShape || "geometrique"),
+    defaultEdgeStyle: normalizeEdgeStyleValue(input.defaultEdgeStyle || fallbackStyle || "dotted"),
+    defaultEdgeColor: normalizeEdgeColorValue(input.defaultEdgeColor || fallbackColor || "#e15d44"),
+  };
+}
+
+function parseProjectZones(payload, fallbackLayout = "horizontal", fallbackShape = "geometrique") {
+  const zones = [];
+  const wrapper = payload && typeof payload === "object" ? payload : null;
+  const fallbackStyle = "dotted";
+  const fallbackColor = "#e15d44";
+
+  if (wrapper && Array.isArray(wrapper.zones)) {
+    for (let i = 0; i < wrapper.zones.length; i += 1) {
+      const zone = zoneFromRecord(
+        wrapper.zones[i],
+        `Zone ${i + 1}`,
+        fallbackLayout,
+        fallbackShape,
+        fallbackStyle,
+        fallbackColor,
+      );
+      if (zone) zones.push(zone);
+    }
+    const currentZoneId = String(wrapper.currentZoneId || "");
+    return {
+      zones,
+      currentZoneId: zones.some((zone) => zone.id === currentZoneId) ? currentZoneId : (zones[0] ? zones[0].id : null),
+    };
+  }
+
+  const legacy = zoneFromRecord(
+    { graph: payload, id: makeZoneId(), name: "Zone 1", preferredLayout: fallbackLayout, defaultEdgeShape: fallbackShape, defaultEdgeStyle: fallbackStyle, defaultEdgeColor: fallbackColor },
+    "Zone 1",
+    fallbackLayout,
+    fallbackShape,
+    fallbackStyle,
+    fallbackColor,
+  );
+  if (legacy) {
+    zones.push(legacy);
+  } else {
+    zones.push(zoneFromRecord(
+      { graph: createDefaultGraph(), id: makeZoneId(), name: "Zone 1", preferredLayout: fallbackLayout, defaultEdgeShape: fallbackShape, defaultEdgeStyle: fallbackStyle, defaultEdgeColor: fallbackColor },
+      "Zone 1",
+      fallbackLayout,
+      fallbackShape,
+      fallbackStyle,
+      fallbackColor,
+    ));
+  }
+  return { zones: zones.filter(Boolean), currentZoneId: zones[0] ? zones[0].id : null };
+}
+
+function getActiveZone() {
+  return state.zones.find((zone) => zone.id === state.currentZoneId) || null;
+}
+
+function getSelectedNodeIds() {
+  if (typeof groupStateUtils.sanitizeSelectedNodeIds === "function") {
+    return groupStateUtils.sanitizeSelectedNodeIds(state.graph.nodes, state.selectedNodeIds, state.selectedNodeId);
+  }
+  const alive = new Set(state.graph.nodes.map((node) => node.id));
+  const list = [];
+  for (const id of state.selectedNodeIds || []) {
+    if (alive.has(id) && !list.includes(id)) list.push(id);
+  }
+  if (!list.length && state.selectedNodeId && alive.has(state.selectedNodeId)) {
+    list.push(state.selectedNodeId);
+  }
+  return list;
+}
+
+function setSelectedNodeIds(ids) {
+  const alive = new Set(state.graph.nodes.map((node) => node.id));
+  const next = [];
+  for (const rawId of ids || []) {
+    const id = String(rawId || "");
+    if (!id || !alive.has(id) || next.includes(id)) continue;
+    next.push(id);
+  }
+  state.selectedNodeIds = next;
+  state.selectedNodeId = next[0] || null;
+  if (!next.length) {
+    state.activeGroupId = "";
+  }
+}
+
+function groupMembersForNode(nodeId) {
+  const node = getNode(nodeId);
+  if (!node || !node.groupId) return [nodeId];
+  const members = state.graph.nodes
+    .filter((candidate) => candidate.groupId && candidate.groupId === node.groupId)
+    .map((candidate) => candidate.id);
+  return members.length ? members : [nodeId];
+}
+
+function ensureGraphGroups() {
+  if (!Array.isArray(state.graph.groups)) state.graph.groups = [];
+}
+
+function getGroupMeta(groupId) {
+  if (!groupId) return null;
+  ensureGraphGroups();
+  let meta = state.graph.groups.find((group) => group.id === groupId);
+  if (!meta) {
+    meta = { id: groupId, title: "Groupe", color: "#eef3ff" };
+    state.graph.groups.push(meta);
+  }
+  return meta;
+}
+
+function cleanupGroupMeta() {
+  ensureGraphGroups();
+  const alive = new Set(
+    state.graph.nodes
+      .map((node) => node.groupId)
+      .filter((value) => typeof value === "string" && value.length > 0),
+  );
+  state.graph.groups = state.graph.groups.filter((group) => alive.has(group.id));
+  if (state.groupUiPrefs && state.groupUiPrefs.size) {
+    for (const key of Array.from(state.groupUiPrefs.keys())) {
+      if (!alive.has(key)) state.groupUiPrefs.delete(key);
+    }
+  }
+}
+
+function getGroupUiPrefs(groupId) {
+  if (!groupId) return null;
+  if (!state.groupUiPrefs) state.groupUiPrefs = new Map();
+  if (typeof groupStateUtils.ensureGroupUiPrefs === "function") {
+    return groupStateUtils.ensureGroupUiPrefs(
+      state.groupUiPrefs,
+      groupId,
+      state.preferredLayout,
+      normalizeLayoutMode,
+      dominantEdgeShapeForGroup,
+    );
+  }
+  if (!state.groupUiPrefs.has(groupId)) {
+    state.groupUiPrefs.set(groupId, {
+      layout: normalizeLayoutMode(state.preferredLayout || "horizontal"),
+      edgeShape: dominantEdgeShapeForGroup(groupId),
+    });
+  }
+  return state.groupUiPrefs.get(groupId);
+}
+
+function rectFromPoints(a, b) {
+  if (typeof groupUtils.rectFromPoints === "function") {
+    return groupUtils.rectFromPoints(a, b);
+  }
+  const left = Math.min(a.x, b.x);
+  const top = Math.min(a.y, b.y);
+  const right = Math.max(a.x, b.x);
+  const bottom = Math.max(a.y, b.y);
+  return { left, top, right, bottom, width: right - left, height: bottom - top };
+}
+
+function nodeInRect(node, rect) {
+  if (typeof groupUtils.nodeInRect === "function") {
+    return groupUtils.nodeInRect(node, rect, getNodeWidth, getNodeHeight);
+  }
+  const width = getNodeWidth(node);
+  const height = getNodeHeight(node);
+  const cx = node.x + width / 2;
+  const cy = node.y + height / 2;
+  return (
+    cx >= rect.left
+    && cx <= rect.right
+    && cy >= rect.top
+    && cy <= rect.bottom
+  );
+}
+
+function selectedGroupId() {
+  if (typeof groupStateUtils.resolveSelectedGroupId === "function") {
+    const gid = groupStateUtils.resolveSelectedGroupId(
+      state.activeGroupId,
+      getSelectedNodeIds(),
+      getNode,
+      (groupId) => state.graph.nodes.some((node) => node.groupId === groupId),
+    );
+    state.activeGroupId = gid;
+    return gid;
+  }
+  if (state.activeGroupId) {
+    const stillExists = state.graph.nodes.some((node) => node.groupId === state.activeGroupId);
+    if (stillExists) return state.activeGroupId;
+    state.activeGroupId = "";
+  }
+  const ids = getSelectedNodeIds();
+  if (ids.length < 2) return "";
+  const first = getNode(ids[0]);
+  if (!first || !first.groupId) return "";
+  const gid = first.groupId;
+  for (const id of ids) {
+    const node = getNode(id);
+    if (!node || node.groupId !== gid) return "";
+  }
+  return gid;
+}
+
+function ungroupByGroupId(groupId) {
+  if (!groupId) return;
+  commit(() => {
+    for (const node of state.graph.nodes) {
+      if (node.groupId === groupId) node.groupId = "";
+    }
+    cleanupGroupMeta();
+  }, "Nœuds dissociés");
+  if (state.activeGroupId === groupId) state.activeGroupId = "";
+  if (state.groupEditorGroupId === groupId) state.groupEditorGroupId = "";
+}
+
+function boundsForNodeIds(ids) {
+  if (typeof groupUtils.boundsForNodeIds === "function") {
+    return groupUtils.boundsForNodeIds(ids, getNode, getNodeWidth, getNodeHeight);
+  }
+  if (!ids || !ids.length) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const id of ids) {
+    const node = getNode(id);
+    if (!node) continue;
+    const width = getNodeWidth(node);
+    const height = getNodeHeight(node);
+    minX = Math.min(minX, node.x);
+    minY = Math.min(minY, node.y);
+    maxX = Math.max(maxX, node.x + width);
+    maxY = Math.max(maxY, node.y + height);
+  }
+  if (!Number.isFinite(minX)) return null;
+  return { left: minX, top: minY, right: maxX, bottom: maxY, width: maxX - minX, height: maxY - minY };
+}
+
+function groupBounds(groupId, pad = 16) {
+  if (typeof groupUtils.groupBounds === "function") {
+    return groupUtils.groupBounds(groupId, state.graph.nodes, getNode, getNodeWidth, getNodeHeight, pad);
+  }
+  if (!groupId) return null;
+  const ids = state.graph.nodes.filter((node) => node.groupId === groupId).map((node) => node.id);
+  if (!ids.length) return null;
+  const bounds = boundsForNodeIds(ids);
+  if (!bounds) return null;
+  return {
+    left: bounds.left - pad,
+    top: bounds.top - pad,
+    right: bounds.right + pad,
+    bottom: bounds.bottom + pad,
+    width: bounds.width + pad * 2,
+    height: bounds.height + pad * 2,
+  };
+}
+
+function findGroupTitleAtPoint(worldPoint) {
+  if (typeof groupUtils.findGroupTitleAtPoint === "function") {
+    return groupUtils.findGroupTitleAtPoint(worldPoint, state.graph.nodes, getGroupMeta, getNode, getNodeWidth, getNodeHeight);
+  }
+  if (!worldPoint) return "";
+  const gids = Array.from(new Set(
+    state.graph.nodes
+      .map((node) => node.groupId)
+      .filter((value) => typeof value === "string" && value.length > 0),
+  ));
+  for (const groupId of gids) {
+    const box = groupBounds(groupId);
+    if (!box) continue;
+    const meta = getGroupMeta(groupId);
+    const title = String((meta && meta.title) || "Groupe");
+    const visualWidth = Math.max(68, Math.min(280, 18 + title.length * 6.8));
+    const titleWidth = Math.max(140, visualWidth + 22);
+    const titleHeight = 32;
+    const titleLeft = box.left + 6;
+    const titleTop = box.top - 16;
+    const insideTitle = (
+      worldPoint.x >= titleLeft
+      && worldPoint.x <= titleLeft + titleWidth
+      && worldPoint.y >= titleTop
+      && worldPoint.y <= titleTop + titleHeight
+    );
+    if (insideTitle) return groupId;
+  }
+  return "";
+}
+
+function findGroupZoneAtPoint(worldPoint) {
+  if (typeof groupUtils.findGroupZoneAtPoint === "function") {
+    return groupUtils.findGroupZoneAtPoint(worldPoint, state.graph.nodes, getNode, getNodeWidth, getNodeHeight);
+  }
+  if (!worldPoint) return "";
+  const gids = Array.from(new Set(
+    state.graph.nodes
+      .map((node) => node.groupId)
+      .filter((value) => typeof value === "string" && value.length > 0),
+  ));
+  let bestGroupId = "";
+  let bestArea = Number.POSITIVE_INFINITY;
+  for (const groupId of gids) {
+    const box = groupBounds(groupId);
+    if (!box) continue;
+    const inside = (
+      worldPoint.x >= box.left
+      && worldPoint.x <= box.right
+      && worldPoint.y >= box.top
+      && worldPoint.y <= box.bottom
+    );
+    if (!inside) continue;
+    const area = box.width * box.height;
+    if (area < bestArea) {
+      bestArea = area;
+      bestGroupId = groupId;
+    }
+  }
+  return bestGroupId;
+}
+
+function syncActiveZoneFromState() {
+  const zone = getActiveZone();
+  if (!zone) return;
+  zone.graph = core.cloneGraph(state.graph);
+  zone.preferredLayout = normalizeLayoutMode(state.preferredLayout || "horizontal");
+  zone.defaultEdgeShape = normalizeEdgeShape(state.defaultEdgeShape || "geometrique");
+  zone.defaultEdgeStyle = normalizeEdgeStyleValue(state.defaultEdgeStyle || "dotted");
+  zone.defaultEdgeColor = normalizeEdgeColorValue(state.defaultEdgeColor || "#e15d44");
+}
+
+function applyZoneToState(zone, label = "") {
+  if (!zone) return false;
+  const validated = core.validateAndNormalizeData(zone.graph);
+  if (!validated.ok) return false;
+  history.clear();
+  state.currentZoneId = zone.id;
+  state.groupUiPrefs = new Map();
+  state.preferredLayout = normalizeLayoutMode(zone.preferredLayout || "horizontal");
+  state.defaultEdgeShape = normalizeEdgeShape(zone.defaultEdgeShape || deriveDefaultEdgeShapeFromGraph());
+  state.defaultEdgeStyle = normalizeEdgeStyleValue(zone.defaultEdgeStyle || "dotted");
+  if (state.defaultEdgeStyle === "solid") {
+    state.defaultEdgeStyle = "dotted";
+    zone.defaultEdgeStyle = "dotted";
+  }
+  state.defaultEdgeColor = normalizeEdgeColorValue(zone.defaultEdgeColor || "#e15d44");
+  state.graph = validated.data;
+  // Legacy migration: keep free links dotted by default, but preserve tree edges as solid.
+  const freeEdges = state.graph.edges.filter((edge) => edge && edge.type === "free");
+  const hasStyledNonSolidFree = freeEdges.some(
+    (edge) => edge.style === "dashed" || edge.style === "dotted",
+  );
+  if (!hasStyledNonSolidFree && freeEdges.length) {
+    state.defaultEdgeStyle = "dotted";
+    if (zone) zone.defaultEdgeStyle = "dotted";
+    for (const edge of freeEdges) {
+      edge.style = "dotted";
+    }
+  }
+  state.selectedNodeId = null;
+  state.selectedNodeIds = [];
+  state.selectedEdgeId = null;
+  state.inlineEditNodeId = null;
+  state.linkDraft = null;
+  state.linkMode = false;
+  resetRealtimeVersionState(state.graph);
+  state.lastSavedHash = graphHash();
+  if (label) setStatus(label, false);
+  refreshZoneUi();
+  requestRender();
+  return true;
+}
+
+function serializeZonesPayload() {
+  syncActiveZoneFromState();
+  return {
+    version: 1,
+    currentZoneId: state.currentZoneId,
+    zones: state.zones.map((zone) => ({
+      id: zone.id,
+      name: zone.name,
+      graph: core.cloneGraph(zone.graph),
+      preferredLayout: zone.preferredLayout || "horizontal",
+      defaultEdgeShape: normalizeEdgeShape(zone.defaultEdgeShape || "geometrique"),
+      defaultEdgeStyle: normalizeEdgeStyleValue(zone.defaultEdgeStyle || "dotted"),
+      defaultEdgeColor: normalizeEdgeColorValue(zone.defaultEdgeColor || "#e15d44"),
+    })),
+  };
+}
+
 function refreshProjectUi() {
   if (!els.projectSelect) return;
   const previous = els.projectSelect.value;
@@ -905,6 +1424,23 @@ function refreshProjectUi() {
   if (els.projectDeleteBtn) els.projectDeleteBtn.disabled = !hasProject || isSingle;
 }
 
+function refreshZoneUi() {
+  if (!els.zoneSelect) return;
+  const previous = els.zoneSelect.value;
+  els.zoneSelect.replaceChildren();
+  for (const zone of state.zones) {
+    const option = document.createElement("option");
+    option.value = zone.id;
+    option.textContent = zone.name || "Zone";
+    els.zoneSelect.appendChild(option);
+  }
+  els.zoneSelect.value = state.currentZoneId || previous || "";
+  const hasZone = state.zones.length > 0;
+  const isSingle = state.zones.length <= 1;
+  if (els.zoneRenameBtn) els.zoneRenameBtn.disabled = !hasZone;
+  if (els.zoneDeleteBtn) els.zoneDeleteBtn.disabled = !hasZone || isSingle;
+}
+
 async function refreshProjectsFromDb() {
   const rows = await listProjectsFromDb();
   rows.sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "fr"));
@@ -914,35 +1450,33 @@ async function refreshProjectsFromDb() {
 
 function loadProjectIntoState(record, label) {
   if (!record || !record.graph) return false;
-  const validated = core.validateAndNormalizeData(record.graph);
-  if (!validated.ok) return false;
-  history.clear();
-  state.preferredLayout = record.preferredLayout || state.preferredLayout || "horizontal";
-  state.graph = applyPreferredLayout(validated.data);
-  state.selectedNodeId = null;
-  state.selectedEdgeId = null;
-  state.inlineEditNodeId = null;
-  state.linkDraft = null;
-  state.linkMode = false;
+  const parsed = parseProjectZones(
+    record.graph,
+    record.preferredLayout || state.preferredLayout || "horizontal",
+    record.defaultEdgeShape || state.defaultEdgeShape || "geometrique",
+  );
+  if (!parsed.zones.length) return false;
+  state.zones = parsed.zones;
   state.currentProjectId = record.id;
   state.currentProjectName = record.name || "Sans nom";
-  state.defaultEdgeShape = normalizeEdgeShape(record.defaultEdgeShape || deriveDefaultEdgeShapeFromGraph());
-  resetRealtimeVersionState(state.graph);
-  state.lastSavedHash = graphHash();
+  const currentZone = state.zones.find((zone) => zone.id === parsed.currentZoneId) || state.zones[0];
+  if (!applyZoneToState(currentZone, "")) return false;
   localStorage.setItem(ACTIVE_PROJECT_KEY, record.id);
   if (label) setStatus(label, false);
   refreshProjectUi();
+  refreshZoneUi();
   requestRender();
   return true;
 }
 
 async function persistCurrentProjectToDb() {
   if (!state.currentProjectId) return;
+  syncActiveZoneFromState();
   const now = new Date().toISOString();
   const record = toProjectRecord({
     id: state.currentProjectId,
     name: state.currentProjectName || "Sans nom",
-    graph: state.graph,
+    graph: serializeZonesPayload(),
     preferredLayout: state.preferredLayout,
     defaultEdgeShape: state.defaultEdgeShape,
     updatedAt: now,
@@ -959,10 +1493,34 @@ async function persistCurrentProjectToDb() {
   }
 }
 
+function enqueuePersistCurrentProject() {
+  if (!state.currentProjectId) return;
+  if (state.persistInFlight) {
+    state.persistPending = true;
+    return;
+  }
+  state.persistInFlight = true;
+  const run = async () => {
+    do {
+      state.persistPending = false;
+      try {
+        await persistCurrentProjectToDb();
+      } catch {
+      }
+    } while (state.persistPending);
+    state.persistInFlight = false;
+  };
+  void run();
+}
+
 async function syncCloudToLocal() {
   if (!state.cloudSyncEnabled) return;
   const cloudRows = await fetchCloudProjects();
   const localRows = await listProjectsFromDb();
+  persistLog("syncCloudToLocal:start", {
+    cloudRows: cloudRows.length,
+    localRows: localRows.length,
+  });
 
   if (!cloudRows.length) {
     for (const local of localRows) {
@@ -973,22 +1531,75 @@ async function syncCloudToLocal() {
 
   const cloudRecords = cloudRows.map(recordFromCloudRow);
   const cloudMap = new Map(cloudRecords.map((record) => [record.id, record]));
-  for (const record of cloudRecords) {
-    await putProjectToDb(record);
-  }
-  for (const local of localRows) {
-    if (!cloudMap.has(local.id)) {
-      await deleteProjectFromDb(local.id);
+  const localMap = new Map(localRows.map((record) => [record.id, record]));
+  const allIds = new Set([...cloudMap.keys(), ...localMap.keys()]);
+  const timeOf = (record) => {
+    const value = record && record.updatedAt ? Date.parse(record.updatedAt) : NaN;
+    return Number.isFinite(value) ? value : 0;
+  };
+  const groupedCountOf = (record) => {
+    if (!record || !record.graph) return 0;
+    const parsed = parseProjectZones(
+      record.graph,
+      record.preferredLayout || "horizontal",
+      record.defaultEdgeShape || "geometrique",
+    );
+    return parsed.zones.reduce((sum, zone) => {
+      const nodes = zone && zone.graph && Array.isArray(zone.graph.nodes) ? zone.graph.nodes : [];
+      return sum + nodes.filter((node) => node && typeof node.groupId === "string" && node.groupId.length > 0).length;
+    }, 0);
+  };
+
+  for (const id of allIds) {
+    const local = localMap.get(id) || null;
+    const cloud = cloudMap.get(id) || null;
+    if (local && !cloud) {
+      persistLog("syncCloudToLocal:push-local-only", { projectId: id });
+      await upsertCloudProject(local);
+      continue;
+    }
+    if (!local && cloud) {
+      persistLog("syncCloudToLocal:pull-cloud-only", { projectId: id });
+      await putProjectToDb(cloud);
+      continue;
+    }
+    if (!local || !cloud) continue;
+    const localTs = timeOf(local);
+    const cloudTs = timeOf(cloud);
+    const localGroups = groupedCountOf(local);
+    const cloudGroups = groupedCountOf(cloud);
+    const preferLocalByGroups = localGroups > cloudGroups;
+    const preferCloudByGroups = cloudGroups > localGroups;
+    if (preferLocalByGroups || (!preferCloudByGroups && localTs >= cloudTs)) {
+      persistLog("syncCloudToLocal:prefer-local", {
+        projectId: id,
+        localTs,
+        cloudTs,
+        localGroups,
+        cloudGroups,
+      });
+      await putProjectToDb(local);
+      await upsertCloudProject(local);
+    } else {
+      persistLog("syncCloudToLocal:prefer-cloud", {
+        projectId: id,
+        localTs,
+        cloudTs,
+        localGroups,
+        cloudGroups,
+      });
+      await putProjectToDb(cloud);
     }
   }
 }
 
 async function syncCloudFromCurrentState() {
   if (!state.cloudSyncEnabled || !state.currentProjectId) return;
+  syncActiveZoneFromState();
   const record = toProjectRecord({
     id: state.currentProjectId,
     name: state.currentProjectName || "Sans nom",
-    graph: state.graph,
+    graph: serializeZonesPayload(),
     preferredLayout: state.preferredLayout,
     defaultEdgeShape: state.defaultEdgeShape,
     updatedAt: new Date().toISOString(),
@@ -1034,6 +1645,11 @@ function requestRender() {
   });
 }
 
+function syncRectSelectCursor() {
+  if (!els.canvas) return;
+  els.canvas.classList.toggle("rect-select-mode", Boolean(state.rectSelectMode));
+}
+
 function getNode(id) {
   return state.graph.nodes.find((node) => node.id === id);
 }
@@ -1068,7 +1684,11 @@ function getEdgeColor(edge) {
 }
 
 function getEdgeStyle(edge) {
-  return edge && (edge.style === "dashed" || edge.style === "dotted") ? edge.style : "solid";
+  if (edge && (edge.style === "dashed" || edge.style === "dotted" || edge.style === "solid")) {
+    return edge.style;
+  }
+  if (edge && edge.type === "tree") return "solid";
+  return normalizeEdgeStyleValue(state.defaultEdgeStyle || "dotted");
 }
 
 function getEdgeDashArray(edge) {
@@ -1088,6 +1708,36 @@ function normalizeEdgeShape(value) {
   return "geometrique";
 }
 
+function dominantEdgeShapeForGroup(groupId) {
+  if (!groupId) return normalizeEdgeShape(state.defaultEdgeShape);
+  const groupNodeIds = new Set(
+    state.graph.nodes.filter((node) => node.groupId === groupId).map((node) => node.id),
+  );
+  if (!groupNodeIds.size) return normalizeEdgeShape(state.defaultEdgeShape);
+  const edges = state.graph.edges.filter(
+    (edge) => groupNodeIds.has(edge.source) || groupNodeIds.has(edge.target),
+  );
+  if (!edges.length) return normalizeEdgeShape(state.defaultEdgeShape);
+  const counts = new Map([
+    ["geometrique", 0],
+    ["arrondi", 0],
+    ["courbe", 0],
+  ]);
+  for (const edge of edges) {
+    const shape = getEdgeShape(edge);
+    counts.set(shape, (counts.get(shape) || 0) + 1);
+  }
+  let best = "geometrique";
+  let bestCount = -1;
+  for (const [shape, count] of counts.entries()) {
+    if (count > bestCount) {
+      best = shape;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
 function normalizeTextAlign(value, fallback = "left") {
   if (value === "center" || value === "right" || value === "left") return value;
   return fallback;
@@ -1096,6 +1746,23 @@ function normalizeTextAlign(value, fallback = "left") {
 function normalizeTitleLink(value) {
   if (typeof value !== "string") return "";
   return value.trim().slice(0, 500);
+}
+
+function normalizeHexColor(value) {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(trimmed)) return trimmed.toLowerCase();
+  if (/^#[0-9a-fA-F]{3}$/.test(trimmed)) {
+    const r = trimmed[1];
+    const g = trimmed[2];
+    const b = trimmed[3];
+    return `#${r}${r}${g}${g}${b}${b}`.toLowerCase();
+  }
+  return "";
+}
+
+function getEdgeLabelBackground(edge) {
+  return normalizeHexColor(edge && edge.labelBgColor) || "#ffffff";
 }
 
 function isValidHttpLink(value) {
@@ -1376,6 +2043,73 @@ function polylineMidpoint(points) {
   return { x: last.x, y: last.y };
 }
 
+function pointOnSegmentAtDistance(a, b, segmentLengthValue, distanceFromA) {
+  const len = Math.max(0.0001, segmentLengthValue);
+  const ratio = Math.max(0, Math.min(1, distanceFromA / len));
+  return {
+    x: a.x + (b.x - a.x) * ratio,
+    y: a.y + (b.y - a.y) * ratio,
+  };
+}
+
+function slicePolylineByDistance(points, startDistance, endDistance) {
+  if (!points || points.length < 2) return points || [];
+  const total = polylineLength(points);
+  const start = clamp(startDistance, 0, total);
+  const end = clamp(endDistance, 0, total);
+  if (end <= start) return [];
+
+  const out = [];
+  let walked = 0;
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const a = points[i];
+    const b = points[i + 1];
+    const segLen = segmentLength(a, b);
+    const segStart = walked;
+    const segEnd = walked + segLen;
+    walked = segEnd;
+    if (segLen < 0.0001) continue;
+    if (end <= segStart || start >= segEnd) continue;
+
+    const localStart = Math.max(start, segStart);
+    const localEnd = Math.min(end, segEnd);
+    const startPoint = pointOnSegmentAtDistance(a, b, segLen, localStart - segStart);
+    const endPoint = pointOnSegmentAtDistance(a, b, segLen, localEnd - segStart);
+    if (!out.length) {
+      out.push(startPoint);
+    } else {
+      const prev = out[out.length - 1];
+      if (Math.abs(prev.x - startPoint.x) > 0.01 || Math.abs(prev.y - startPoint.y) > 0.01) {
+        out.push(startPoint);
+      }
+    }
+    out.push(endPoint);
+  }
+  return compressOrthogonalPath(out);
+}
+
+function estimateEdgeLabelGap(edge) {
+  const text = String((edge && edge.label) || "");
+  return Math.max(44, Math.min(360, text.length * 7.2 + 20));
+}
+
+function splitPolylineForLabel(points, gapLength) {
+  if (!points || points.length < 2) return [points || []];
+  const total = polylineLength(points);
+  if (total < 2) return [points];
+  const gap = clamp(gapLength, 0, Math.max(0, total - 2));
+  if (gap < 1) return [points];
+  const mid = total / 2;
+  const gapStart = clamp(mid - gap / 2, 0, total);
+  const gapEnd = clamp(mid + gap / 2, 0, total);
+  const before = slicePolylineByDistance(points, 0, gapStart);
+  const after = slicePolylineByDistance(points, gapEnd, total);
+  const segments = [];
+  if (before.length >= 2) segments.push(before);
+  if (after.length >= 2) segments.push(after);
+  return segments.length ? segments : [points];
+}
+
 function edgeAnchors(source, target) {
   const sourceWidth = getNodeWidth(source);
   const sourceHeight = getNodeHeight(source);
@@ -1410,6 +2144,18 @@ function edgeAnchors(source, target) {
     start: { x: sx, y: source.y, side: "top" },
     end: { x: tx, y: target.y + targetHeight, side: "bottom" },
   };
+}
+
+function edgeRoutingScopeKey(edge) {
+  if (!edge) return "global";
+  const source = getNode(edge.source);
+  const target = getNode(edge.target);
+  const sg = source && source.groupId ? source.groupId : "";
+  const tg = target && target.groupId ? target.groupId : "";
+  if (sg && tg && sg === tg) return `group:${sg}`;
+  if (!sg && !tg) return "ungrouped";
+  const parts = [sg || "none", tg || "none"].sort();
+  return `mixed:${parts[0]}|${parts[1]}`;
 }
 
 function getTreeFanSide(parent, layout) {
@@ -1480,6 +2226,15 @@ function parentChildren(parentId) {
   return state.graph.nodes.filter((node) => node.parentId === parentId);
 }
 
+function stableSmallHash(text) {
+  const s = String(text || "");
+  let h = 0;
+  for (let i = 0; i < s.length; i += 1) {
+    h = (h * 31 + s.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h);
+}
+
 function computeTreeBusCoordinate(parent, layout, side) {
   const children = parentChildren(parent.id);
   const parentWidth = getNodeWidth(parent);
@@ -1500,6 +2255,9 @@ function computeTreeBusCoordinate(parent, layout, side) {
       const max = startY - ROUTE_STUB;
       bus = clamp(bus, min, max);
     }
+    // Add a tiny deterministic lane offset to reduce parallel overlaps in vertical trees.
+    const lane = (stableSmallHash(parent.id) % 5) - 2; // -2..2
+    bus = alignToStep(bus + lane * (ROUTE_ALIGN_STEP * 0.6));
     return bus;
   }
 
@@ -1880,9 +2638,10 @@ function createFreeEdge(sourceId, targetId) {
       label: "",
       style: state.defaultEdgeStyle,
       shape: state.defaultEdgeShape,
+      labelBgColor: "#ffffff",
     });
     state.selectedEdgeId = null;
-    state.selectedNodeId = targetId;
+    setSelectedNodeIds([targetId]);
   }, "Lien créé");
 }
 
@@ -1984,6 +2743,7 @@ function appliquerTexteLienParDefaut(edge) {
   edge.textBold = isTextBold(edge);
   edge.textItalic = isTextItalic(edge);
   edge.titleLink = normalizeTitleLink(edge.titleLink);
+  edge.labelBgColor = getEdgeLabelBackground(edge);
 }
 
 function computeMapSize() {
@@ -2067,8 +2827,10 @@ function genererTemplate(type) {
 }
 
 function commit(mutator, label) {
-  if (state.selectedNodeId && isNodeLockedByOther(state.selectedNodeId)) {
-    const owner = getLockOwner(state.selectedNodeId);
+  const selectedIds = state.selectedEdgeId ? [] : getSelectedNodeIds();
+  const lockedId = selectedIds.find((id) => isNodeLockedByOther(id));
+  if (lockedId) {
+    const owner = getLockOwner(lockedId);
     setStatus(`Nœud verrouillé par ${owner ? owner.name : "un autre membre"}`, true);
     requestRender();
     return false;
@@ -2087,6 +2849,7 @@ function commit(mutator, label) {
   const changed = JSON.stringify(before) !== JSON.stringify(state.graph);
   if (!changed) return false;
   const patch = createRealtimePatch(before, state.graph);
+  setSelectedNodeIds(getSelectedNodeIds());
 
   history.push(before);
   saveNow();
@@ -2107,6 +2870,7 @@ function applyGraph(nextGraph, label) {
   }
   state.graph = validated.data;
   state.selectedNodeId = null;
+  state.selectedNodeIds = [];
   state.selectedEdgeId = null;
   state.linkingFrom = null;
   state.defaultEdgeShape = deriveDefaultEdgeShapeFromGraph();
@@ -2118,14 +2882,40 @@ function applyGraph(nextGraph, label) {
   return true;
 }
 
-function selectNode(id) {
+function selectNode(id, options = {}) {
+  const { additive = false, toggle = false, includeGroup = true } = options;
   if (id && isNodeLockedByOther(id)) {
     const owner = getLockOwner(id);
     setStatus(`Édition par ${owner ? owner.name : "un autre membre"}`, true);
   }
-  state.selectedNodeId = id;
+  if (!id) {
+    setSelectedNodeIds([]);
+    state.selectedEdgeId = null;
+    state.groupEditorGroupId = "";
+    trackRealtimePresence();
+    requestRender();
+    return;
+  }
+  const current = getSelectedNodeIds();
+  if (toggle) {
+    if (current.includes(id)) {
+      setSelectedNodeIds(current.filter((value) => value !== id));
+    } else {
+      setSelectedNodeIds([...current, id]);
+    }
+  } else if (additive) {
+    setSelectedNodeIds([...current, id]);
+  } else {
+    setSelectedNodeIds(includeGroup ? groupMembersForNode(id) : [id]);
+  }
+  const selectedNow = getSelectedNodeIds();
+  const groupId = selectedNow.length ? selectedGroupId() : "";
+  state.activeGroupId = groupId || "";
+  if (!state.activeGroupId || state.groupEditorGroupId !== state.activeGroupId) {
+    state.groupEditorGroupId = "";
+  }
   state.selectedEdgeId = null;
-  const node = getNode(id);
+  const node = getNode(state.selectedNodeId);
   appliquerStyleParDefaut(node);
   els.titleInput.value = node ? node.title : "";
   els.textColorInput.value = node ? node.textColor : "#1f2230";
@@ -2140,6 +2930,9 @@ function selectNode(id) {
 function selectEdge(id) {
   state.selectedEdgeId = id;
   state.selectedNodeId = null;
+  state.selectedNodeIds = [];
+  state.activeGroupId = "";
+  state.groupEditorGroupId = "";
   const edge = getEdge(id);
   if (edge) {
     appliquerTexteLienParDefaut(edge);
@@ -2149,6 +2942,9 @@ function selectEdge(id) {
     if (els.edgeTitleLinkInput) {
       els.edgeTitleLinkInput.value = edge.titleLink || "";
     }
+    if (els.edgeTitleBgColorInput) {
+      els.edgeTitleBgColorInput.value = getEdgeLabelBackground(edge) || "#ffffff";
+    }
   }
   trackRealtimePresence();
   requestRender();
@@ -2156,6 +2952,9 @@ function selectEdge(id) {
 
 function clearSelection() {
   state.selectedNodeId = null;
+  state.selectedNodeIds = [];
+  state.activeGroupId = "";
+  state.groupEditorGroupId = "";
   state.selectedEdgeId = null;
   state.linkingFrom = null;
   state.linkDraft = null;
@@ -2190,10 +2989,15 @@ function createNode({
   textBold = false,
   textItalic = false,
   titleLink = "",
+  groupId = "",
   parentId = null,
 } = {}) {
+  let createdId = "";
+  let createdGroupId = "";
   commit(() => {
     const id = String(state.graph.nextId++);
+    createdId = id;
+    createdGroupId = groupId ? String(groupId) : "";
     state.graph.nodes.push({
       id,
       x,
@@ -2211,6 +3015,7 @@ function createNode({
       textBold,
       textItalic,
       titleLink,
+      groupId: createdGroupId,
       parentId,
     });
     if (parentId && kind !== "postit") {
@@ -2220,20 +3025,58 @@ function createNode({
         target: id,
         type: "tree",
         color: state.defaultEdgeColor,
-        style: state.defaultEdgeStyle,
+        style: "solid",
         shape: state.defaultEdgeShape,
         textAlign: "center",
         textBold: false,
         textItalic: false,
         titleLink: "",
+        labelBgColor: "#ffffff",
       });
     }
-    if (state.preferredLayout) {
-      state.graph = core.layoutGraph(state.graph, state.preferredLayout);
-    }
-    state.selectedNodeId = id;
+    setSelectedNodeIds([id]);
     state.selectedEdgeId = null;
   }, "Nœud créé");
+  if (createdId && createdGroupId && state.activeGroupId === createdGroupId) {
+    setSelectedNodeIds(groupMembersForNode(createdId));
+    requestRender();
+  }
+}
+
+function applyLayoutToNodeSubset(nodeIds, mode) {
+  const ids = Array.isArray(nodeIds) ? nodeIds.filter(Boolean) : [];
+  if (ids.length < 2) return;
+  const idSet = new Set(ids);
+  const subsetNodes = state.graph.nodes.filter((node) => idSet.has(node.id));
+  if (subsetNodes.length < 2) return;
+  const beforeBounds = boundsForNodeIds(ids);
+  const subgraph = {
+    nodes: core.cloneGraph(subsetNodes),
+    edges: core.cloneGraph(
+      state.graph.edges.filter((edge) => idSet.has(edge.source) && idSet.has(edge.target)),
+    ),
+    groups: [],
+    nextId: state.graph.nextId,
+  };
+  const laidOut = core.layoutGraph(subgraph, mode);
+  const laidOutBounds = core.getBounds(laidOut.nodes);
+  const anchorBefore = beforeBounds
+    ? { x: beforeBounds.left + beforeBounds.width / 2, y: beforeBounds.top + beforeBounds.height / 2 }
+    : { x: 0, y: 0 };
+  const anchorAfter = {
+    x: laidOutBounds.x + laidOutBounds.width / 2,
+    y: laidOutBounds.y + laidOutBounds.height / 2,
+  };
+  const shiftX = anchorBefore.x - anchorAfter.x;
+  const shiftY = anchorBefore.y - anchorAfter.y;
+  const laidOutById = new Map(laidOut.nodes.map((node) => [node.id, node]));
+  for (const node of state.graph.nodes) {
+    if (!idSet.has(node.id)) continue;
+    const next = laidOutById.get(node.id);
+    if (!next) continue;
+    node.x = Math.round(next.x + shiftX);
+    node.y = Math.round(next.y + shiftY);
+  }
 }
 
 function createRootAtCenter() {
@@ -2262,6 +3105,8 @@ function createPostitAtCenter() {
 }
 
 function addChildToSelected() {
+  const selectedIds = getSelectedNodeIds();
+  if (selectedIds.length !== 1) return;
   if (!state.selectedNodeId) return;
   const parent = getNode(state.selectedNodeId);
   if (!parent) return;
@@ -2271,8 +3116,21 @@ function addChildToSelected() {
     y: parent.y + 80,
     title: `${parent.title} enfant`,
     color: parent.color,
+    groupId: parent.groupId || "",
     parentId: parent.id,
   });
+  if (state.preferredLayout && state.preferredLayout !== "radial") {
+    const scopedIds = typeof groupActionsUtils.scopedLayoutNodeIds === "function"
+      ? groupActionsUtils.scopedLayoutNodeIds(state.graph.nodes, parent.groupId || "", parent.id, core.collectSubtreeIds)
+      : parent.groupId
+        ? state.graph.nodes.filter((node) => node.groupId === parent.groupId).map((node) => node.id)
+        : Array.from(core.collectSubtreeIds(state.graph.nodes, parent.id));
+    if (scopedIds.length >= 2) {
+      commit(() => {
+        applyLayoutToNodeSubset(scopedIds, state.preferredLayout);
+      }, "Disposition locale appliquée");
+    }
+  }
 }
 
 function deleteSelected() {
@@ -2280,16 +3138,22 @@ function deleteSelected() {
     deleteSelectedEdge();
     return;
   }
-  if (!state.selectedNodeId) return;
+  const selectedIds = getSelectedNodeIds();
+  if (!selectedIds.length) return;
 
   commit(() => {
-    const subtree = core.collectSubtreeIds(state.graph.nodes, state.selectedNodeId);
-    state.graph.nodes = state.graph.nodes.filter((node) => !subtree.has(node.id));
-    state.graph.edges = state.graph.edges.filter((edge) => !subtree.has(edge.source) && !subtree.has(edge.target));
+    const allToDelete = new Set();
+    for (const nodeId of selectedIds) {
+      const subtree = core.collectSubtreeIds(state.graph.nodes, nodeId);
+      for (const id of subtree) allToDelete.add(id);
+    }
+    state.graph.nodes = state.graph.nodes.filter((node) => !allToDelete.has(node.id));
+    state.graph.edges = state.graph.edges.filter((edge) => !allToDelete.has(edge.source) && !allToDelete.has(edge.target));
     if (state.preferredLayout) {
       state.graph = core.layoutGraph(state.graph, state.preferredLayout);
     }
     state.selectedNodeId = null;
+    state.selectedNodeIds = [];
   }, "Nœud supprimé");
 }
 
@@ -2306,6 +3170,10 @@ function toggleLinkMode() {
     finishLinkDraft(null);
     return;
   }
+  if (getSelectedNodeIds().length !== 1) {
+    setStatus("Sélectionnez un seul nœud", true);
+    return;
+  }
   const selected = state.selectedNodeId ? getNode(state.selectedNodeId) : null;
   if (selected && !isPostitNode(selected)) {
     startLinkDraft(state.selectedNodeId);
@@ -2315,7 +3183,8 @@ function toggleLinkMode() {
 }
 
 function applyNodeStylePreset(preset) {
-  if (!state.selectedNodeId) return;
+  const selectedIds = getSelectedNodeIds();
+  if (!selectedIds.length) return;
   const presets = {
     ocean: { color: "#dff0ff", textColor: "#0d3b75", borderColor: "#2f7bd4", borderWidth: 2, radius: 14 },
     menthe: { color: "#e5fbef", textColor: "#13462d", borderColor: "#2ca469", borderWidth: 2, radius: 16 },
@@ -2326,20 +3195,72 @@ function applyNodeStylePreset(preset) {
   const style = presets[preset];
   if (!style) return;
   const changed = commit(() => {
-    const node = getNode(state.selectedNodeId);
-    if (!node) return;
-    node.color = style.color;
-    node.textColor = style.textColor;
-    node.borderColor = style.borderColor;
-    node.borderWidth = style.borderWidth;
-    node.radius = style.radius;
+    for (const nodeId of selectedIds) {
+      const node = getNode(nodeId);
+      if (!node) continue;
+      node.color = style.color;
+      node.textColor = style.textColor;
+      node.borderColor = style.borderColor;
+      node.borderWidth = style.borderWidth;
+      node.radius = style.radius;
+    }
   }, "Style du nœud appliqué");
   if (changed && state.selectedNodeId) {
     selectNode(state.selectedNodeId);
   }
 }
 
+function selectedNodesCommit(label, updater) {
+  const selectedIds = getSelectedNodeIds();
+  if (!selectedIds.length) return false;
+  return commit(() => {
+    for (const nodeId of selectedIds) {
+      const node = getNode(nodeId);
+      if (!node) continue;
+      updater(node);
+    }
+  }, label);
+}
+
+function groupSelectedNodes() {
+  const selectedIds = getSelectedNodeIds();
+  if (selectedIds.length < 2) {
+    setStatus("Sélectionnez au moins 2 nœuds", true);
+    return;
+  }
+  const groupId = makeGroupId();
+  commit(() => {
+    for (const id of selectedIds) {
+      const node = getNode(id);
+      if (!node) continue;
+      node.groupId = groupId;
+    }
+    getGroupMeta(groupId);
+    cleanupGroupMeta();
+  }, "Nœuds groupés");
+  state.activeGroupId = groupId;
+  setSelectedNodeIds(selectedIds);
+  requestRender();
+}
+
+function ungroupSelectedNodes() {
+  const selectedIds = getSelectedNodeIds();
+  if (!selectedIds.length) return;
+  commit(() => {
+    for (const id of selectedIds) {
+      const node = getNode(id);
+      if (!node) continue;
+      node.groupId = "";
+    }
+    cleanupGroupMeta();
+  }, "Nœuds dissociés");
+  state.activeGroupId = "";
+}
+
 function traitPresetConfig(preset) {
+  if (typeof groupActionsUtils.traitPresetConfig === "function") {
+    return groupActionsUtils.traitPresetConfig(preset);
+  }
   const map = {
     net: { color: "#2f98ff", style: "solid", shape: "geometrique" },
     signal: { color: "#e15d44", style: "dashed", shape: "arrondi" },
@@ -2357,7 +3278,9 @@ function applyTraitPresetGlobal(preset) {
   state.defaultEdgeStyle = cfg.style;
   state.defaultEdgeShape = cfg.shape;
   if (!state.graph.edges.length) {
+    saveNow();
     requestRender();
+    setStatus("Preset de traits appliqué", false);
     return;
   }
   commit(() => {
@@ -2381,19 +3304,34 @@ function applyEdgePresetToSelected(preset) {
   }, "Preset du lien appliqué");
 }
 
-function onNodeClick(nodeId) {
-  selectNode(nodeId);
+function onNodeClick(nodeId, options = {}) {
+  selectNode(nodeId, options);
 }
 
 function runLayout(mode) {
-  const libelle = mode === "horizontal" ? "horizontale" : mode === "vertical" ? "verticale" : "radiale";
-  state.preferredLayout = mode;
+  const libelle = typeof groupActionsUtils.layoutLabel === "function"
+    ? groupActionsUtils.layoutLabel(mode)
+    : mode === "horizontal" ? "horizontale" : mode === "vertical" ? "verticale" : "radiale";
+  const scopedGroupId = selectedGroupId();
+  if (!scopedGroupId) {
+    state.preferredLayout = normalizeLayoutMode(mode);
+  } else {
+    const prefs = getGroupUiPrefs(scopedGroupId);
+    if (prefs) prefs.layout = normalizeLayoutMode(mode);
+  }
   commit(() => {
-    state.graph = core.layoutGraph(state.graph, mode);
-    if (state.selectedNodeId) {
-      centerOnNode(state.selectedNodeId);
+    if (scopedGroupId) {
+      const groupNodes = state.graph.nodes.filter((node) => node.groupId === scopedGroupId);
+      if (groupNodes.length >= 2) {
+        applyLayoutToNodeSubset(groupNodes.map((node) => node.id), mode);
+      }
+    } else {
+      state.graph = core.layoutGraph(state.graph, mode);
+      if (state.selectedNodeId) {
+        centerOnNode(state.selectedNodeId);
+      }
     }
-  }, `Disposition ${libelle} appliquée`);
+  }, scopedGroupId ? `Disposition ${libelle} du groupe appliquée` : `Disposition ${libelle} appliquée`);
 }
 
 function appliquerTemplateSelectionne() {
@@ -2440,24 +3378,125 @@ function redo() {
 
 function clearMap() {
   commit(() => {
-    state.graph = { nodes: [], edges: [], nextId: 1 };
+    state.graph = { nodes: [], edges: [], groups: [], nextId: 1 };
     state.selectedNodeId = null;
+    state.selectedNodeIds = [];
     state.selectedEdgeId = null;
   }, "Carte vidée");
 }
 
 function saveNow() {
+  syncActiveZoneFromState();
   const payload = {
-    ...state.graph,
+    ...serializeZonesPayload(),
     metadata: {
       updatedAt: new Date().toISOString(),
       version: 2,
+      projectId: state.currentProjectId || "",
     },
   };
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  const serialized = JSON.stringify(payload);
+  localStorage.setItem(STORAGE_KEY, serialized);
+  if (state.currentProjectId) {
+    localStorage.setItem(projectStorageKey(state.currentProjectId), serialized);
+  }
+  persistLog("saveNow", {
+    projectId: state.currentProjectId || "",
+    zones: state.zones.length,
+    groupedNodes: countGroupedNodesInZones(state.zones),
+    preferredLayout: state.preferredLayout,
+  });
   state.lastAutosaveAt = Date.now();
   state.lastSavedHash = graphHash();
-  void persistCurrentProjectToDb().catch(() => {});
+  enqueuePersistCurrentProject();
+}
+
+function restoreFromLocalStorageIfNewer(currentRecord) {
+  const currentProjectId = String(state.currentProjectId || "");
+  const raws = [
+    currentProjectId ? localStorage.getItem(projectStorageKey(currentProjectId)) : null,
+    localStorage.getItem(STORAGE_KEY),
+  ].filter(Boolean);
+  persistLog("restore:raws", {
+    projectId: currentProjectId,
+    rawCount: raws.length,
+    dbUpdatedAt: currentRecord && currentRecord.updatedAt ? currentRecord.updatedAt : "",
+  });
+  if (!raws.length) return false;
+
+  const candidates = [];
+  for (const raw of raws) {
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object") continue;
+    const metadata = parsed.metadata && typeof parsed.metadata === "object" ? parsed.metadata : {};
+    const localProjectId = String(metadata.projectId || "");
+    if (localProjectId && localProjectId !== currentProjectId) continue;
+    const parsedZones = parseProjectZones(
+      parsed,
+      state.preferredLayout || "horizontal",
+      state.defaultEdgeShape || "geometrique",
+    );
+    if (!parsedZones.zones.length) continue;
+    candidates.push({ parsedZones, metadata });
+  }
+  if (!candidates.length) return false;
+
+  const recordUpdatedAt = Date.parse(String((currentRecord && currentRecord.updatedAt) || ""));
+  const recordTs = Number.isFinite(recordUpdatedAt) ? recordUpdatedAt : 0;
+
+  candidates.sort((a, b) => {
+    const ta = Date.parse(String((a.metadata && a.metadata.updatedAt) || ""));
+    const tb = Date.parse(String((b.metadata && b.metadata.updatedAt) || ""));
+    const va = Number.isFinite(ta) ? ta : 0;
+    const vb = Number.isFinite(tb) ? tb : 0;
+    if (va !== vb) return vb - va;
+    const ga = countGroupedNodesInZones(a.parsedZones.zones);
+    const gb = countGroupedNodesInZones(b.parsedZones.zones);
+    return gb - ga;
+  });
+
+  const best = candidates[0];
+  const localUpdatedAt = Date.parse(String((best.metadata && best.metadata.updatedAt) || ""));
+  const localTs = Number.isFinite(localUpdatedAt) ? localUpdatedAt : 0;
+  const localGrouped = countGroupedNodesInZones(best.parsedZones.zones);
+  const currentGrouped = countGroupedNodesInZones(state.zones || []);
+  const shouldRestoreByTime = localTs > recordTs;
+  const shouldRestoreByGroups = localGrouped > currentGrouped;
+  const localProjectId = String((best.metadata && best.metadata.projectId) || "");
+  const legacyLocalWithoutProjectId = !localProjectId && localGrouped > 0 && currentGrouped === 0;
+
+  persistLog("restore:decision", {
+    projectId: currentProjectId,
+    localTs,
+    recordTs,
+    localGrouped,
+    currentGrouped,
+    shouldRestoreByTime,
+    shouldRestoreByGroups,
+    legacyLocalWithoutProjectId,
+  });
+  if (!shouldRestoreByTime && !shouldRestoreByGroups && !legacyLocalWithoutProjectId) {
+    return false;
+  }
+
+  state.zones = best.parsedZones.zones;
+  state.currentZoneId = best.parsedZones.currentZoneId || best.parsedZones.zones[0].id;
+  const zone = state.zones.find((item) => item.id === state.currentZoneId) || state.zones[0];
+  if (!zone) return false;
+  if (!applyZoneToState(zone, "")) return false;
+  enqueuePersistCurrentProject();
+  persistLog("restore:applied", {
+    projectId: currentProjectId,
+    zones: state.zones.length,
+    groupedNodes: countGroupedNodesInZones(state.zones),
+  });
+  setStatus("Version locale restaurée", false);
+  return true;
 }
 
 async function loadNow() {
@@ -2516,6 +3555,85 @@ function importJson(file) {
   reader.readAsText(file);
 }
 
+function exportableGroups() {
+  ensureGraphGroups();
+  const byGroupId = new Map();
+  for (const node of state.graph.nodes) {
+    if (!node || !node.groupId) continue;
+    if (!byGroupId.has(node.groupId)) byGroupId.set(node.groupId, 0);
+    byGroupId.set(node.groupId, byGroupId.get(node.groupId) + 1);
+  }
+  const groups = [];
+  for (const [groupId, count] of byGroupId.entries()) {
+    const meta = getGroupMeta(groupId);
+    groups.push({
+      id: groupId,
+      title: (meta && meta.title) ? meta.title : "Groupe",
+      color: (meta && meta.color) ? meta.color : "#eef3ff",
+      count,
+    });
+  }
+  groups.sort((a, b) => a.title.localeCompare(b.title, "fr", { sensitivity: "base" }));
+  return groups;
+}
+
+function refreshExportGroupPicker() {
+  if (!els.exportGroupList) return;
+  const current = new Set(
+    Array.from(els.exportGroupList.querySelectorAll("input[type='checkbox']:checked"))
+      .map((input) => String(input.value)),
+  );
+  const groups = exportableGroups();
+  const fragment = document.createDocumentFragment();
+  for (const group of groups) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.value = group.id;
+    input.checked = current.size ? current.has(group.id) : true;
+    label.appendChild(input);
+    const text = document.createElement("span");
+    text.textContent = `${group.title} (${group.count})`;
+    label.appendChild(text);
+    fragment.appendChild(label);
+  }
+  els.exportGroupList.replaceChildren(fragment);
+  updateExportGroupSummary();
+}
+
+function syncExportGroupPickerVisibility() {
+  if (!els.exportGroupsPicker) return;
+  const useGroups = (els.exportRegion && els.exportRegion.value === "groups");
+  els.exportGroupsPicker.hidden = !useGroups;
+  if (useGroups) {
+    refreshExportGroupPicker();
+  } else if (els.exportGroupDropdown) {
+    els.exportGroupDropdown.open = false;
+  }
+}
+
+function selectedExportGroupIds() {
+  if (!els.exportGroupList) return [];
+  return Array.from(els.exportGroupList.querySelectorAll("input[type='checkbox']:checked"))
+    .map((input) => String(input.value || ""))
+    .filter(Boolean);
+}
+
+function updateExportGroupSummary() {
+  if (!els.exportGroupSummary || !els.exportGroupList) return;
+  const total = els.exportGroupList.querySelectorAll("input[type='checkbox']").length;
+  const selected = selectedExportGroupIds().length;
+  if (!total) {
+    els.exportGroupSummary.textContent = "Aucun groupe";
+    return;
+  }
+  if (!selected || selected === total) {
+    els.exportGroupSummary.textContent = selected === total ? "Tous les groupes" : "Choisir les groupes";
+    return;
+  }
+  els.exportGroupSummary.textContent = `${selected} groupe${selected > 1 ? "s" : ""} sélectionné${selected > 1 ? "s" : ""}`;
+}
+
 function getExportContext() {
   const region = els.exportRegion.value;
   const scale = Number(els.exportScale.value) || 1;
@@ -2528,6 +3646,22 @@ function getExportContext() {
 
   if (region === "subtree" && state.selectedNodeId) {
     nodeIds = core.collectSubtreeIds(state.graph.nodes, state.selectedNodeId);
+    bounds = getContentBounds(nodeIds);
+  } else if (region === "groups") {
+    const groupIds = new Set(selectedExportGroupIds());
+    if (!groupIds.size) {
+      setStatus("Sélectionnez au moins un groupe pour exporter", true);
+      return null;
+    }
+    nodeIds = new Set(
+      state.graph.nodes
+        .filter((node) => node && node.groupId && groupIds.has(node.groupId))
+        .map((node) => node.id),
+    );
+    if (!nodeIds.size) {
+      setStatus("Aucun nœud dans les groupes sélectionnés", true);
+      return null;
+    }
     bounds = getContentBounds(nodeIds);
   } else if (region === "visible") {
     const rect = els.canvas.getBoundingClientRect();
@@ -2574,14 +3708,13 @@ function getContentBounds(nodeIds) {
     }
 
     if (edge.label) {
-      const align = getTextAlignForEdge(edge);
-      const baseX = route.mid.x;
-      const labelX = align === "left" ? baseX - 54 : align === "right" ? baseX + 54 : baseX;
-      const labelY = route.mid.y - 8;
-      minX = Math.min(minX, labelX - 120);
-      maxX = Math.max(maxX, labelX + 120);
-      minY = Math.min(minY, labelY - 20);
-      maxY = Math.max(maxY, labelY + 20);
+      const labelX = route.mid.x;
+      const labelY = route.mid.y;
+      const halfW = estimateEdgeLabelGap(edge) * 0.5;
+      minX = Math.min(minX, labelX - halfW - 8);
+      maxX = Math.max(maxX, labelX + halfW + 8);
+      minY = Math.min(minY, labelY - 14);
+      maxY = Math.max(maxY, labelY + 14);
     }
   }
 
@@ -2598,26 +3731,29 @@ function isExportModalOpen() {
 }
 
 function openExportModal() {
+  syncExportGroupPickerVisibility();
   els.exportModal.hidden = false;
 }
 
 function closeExportModal() {
   els.exportModal.hidden = true;
+  if (els.exportGroupDropdown) els.exportGroupDropdown.open = false;
 }
 
 function runExportFromModal() {
   const format = (els.exportFormat.value || "png").toLowerCase();
+  let ok = false;
   if (format === "svg") {
-    exportSvg();
-    setStatus("Export SVG généré", false);
+    ok = exportSvg();
+    if (ok) setStatus("Export SVG généré", false);
   } else if (format === "pdf") {
-    exportPdf();
-    setStatus("Export PDF prêt (impression)", false);
+    ok = exportPdf();
+    if (ok) setStatus("Export PDF prêt (impression)", false);
   } else {
-    exportPng();
-    setStatus("Export PNG généré", false);
+    ok = exportPng();
+    if (ok) setStatus("Export PNG généré", false);
   }
-  closeExportModal();
+  if (ok) closeExportModal();
 }
 
 function runExportJsonFromModal() {
@@ -2644,25 +3780,28 @@ function renderToCanvas(ctx, bounds, nodeIds, transparent) {
     if (!edgeVisible(edge, nodeIds)) continue;
     const route = computeEdgeRoute(edge, occupied);
     if (!route) continue;
-
-    ctx.beginPath();
-    drawEdgePathOnCanvas(ctx, route.points, getEdgeShape(edge), bounds.x, bounds.y);
-    ctx.strokeStyle = getEdgeColor(edge);
-    ctx.lineWidth = edge.id === state.selectedEdgeId ? 3.5 : edge.type === "free" ? 2.4 : 2;
-    if (getEdgeStyle(edge) === "dashed") ctx.setLineDash([7, 5]);
-    else if (getEdgeStyle(edge) === "dotted") ctx.setLineDash([2, 5]);
-    else ctx.setLineDash([]);
-    ctx.stroke();
+    const segments = edge.label ? splitPolylineForLabel(route.points, estimateEdgeLabelGap(edge)) : [route.points];
+    for (const segment of segments) {
+      if (!segment || segment.length < 2) continue;
+      ctx.beginPath();
+      drawEdgePathOnCanvas(ctx, segment, getEdgeShape(edge), bounds.x, bounds.y);
+      ctx.strokeStyle = getEdgeColor(edge);
+      ctx.lineWidth = edge.id === state.selectedEdgeId ? 3.5 : edge.type === "free" ? 2.4 : 2;
+      if (getEdgeStyle(edge) === "dashed") ctx.setLineDash([7, 5]);
+      else if (getEdgeStyle(edge) === "dotted") ctx.setLineDash([2, 5]);
+      else ctx.setLineDash([]);
+      ctx.stroke();
+    }
     if (edge.label) {
       appliquerTexteLienParDefaut(edge);
       ctx.setLineDash([]);
-      ctx.fillStyle = "#2a3140";
-      const align = getTextAlignForEdge(edge);
-      ctx.textAlign = align;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
       ctx.font = `${isTextItalic(edge) ? "italic " : ""}${isTextBold(edge) ? "700 " : "500 "}12px Avenir Next, Segoe UI, sans-serif`;
-      const baseX = route.mid.x - bounds.x;
-      const x = align === "left" ? baseX - 54 : align === "right" ? baseX + 54 : baseX;
-      ctx.fillText(edge.label, x, route.mid.y - bounds.y - 8);
+      const x = route.mid.x - bounds.x;
+      const y = route.mid.y - bounds.y;
+      ctx.fillStyle = "#2a3140";
+      ctx.fillText(edge.label, x, y);
     }
     addPathSegments(route.points, occupied);
   }
@@ -2692,7 +3831,9 @@ function renderToCanvas(ctx, bounds, nodeIds, transparent) {
 }
 
 function exportPng() {
-  const { bounds, nodeIds, scale, transparent } = getExportContext();
+  const context = getExportContext();
+  if (!context) return false;
+  const { bounds, nodeIds, scale, transparent } = context;
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, Math.floor(bounds.width * scale));
   canvas.height = Math.max(1, Math.floor(bounds.height * scale));
@@ -2705,6 +3846,7 @@ function exportPng() {
     if (!blob) return;
     downloadBlob(blob, "mindmap.png");
   }, "image/png");
+  return true;
 }
 
 function buildSvgMarkup(bounds, nodeIds, transparent, withLinks = false) {
@@ -2719,28 +3861,30 @@ function buildSvgMarkup(bounds, nodeIds, transparent, withLinks = false) {
     const route = computeEdgeRoute(edge, occupied);
     if (!route) continue;
     const dash = getEdgeStyle(edge) === "dashed" ? "7 5" : getEdgeStyle(edge) === "dotted" ? "2 5" : "";
-    svg += `<path d="${edgePathDataForShape(route.points, getEdgeShape(edge), bounds.x, bounds.y)}" fill="none" stroke="${getEdgeColor(
-      edge,
-    )}" stroke-width="${edge.id === state.selectedEdgeId ? 3.5 : edge.type === "free" ? 2.4 : 2}" ${
-      dash ? `stroke-dasharray="${dash}"` : ""
-    } />`;
+    const segments = edge.label ? splitPolylineForLabel(route.points, estimateEdgeLabelGap(edge)) : [route.points];
+    for (const segment of segments) {
+      if (!segment || segment.length < 2) continue;
+      svg += `<path d="${edgePathDataForShape(segment, getEdgeShape(edge), bounds.x, bounds.y)}" fill="none" stroke="${getEdgeColor(
+        edge,
+      )}" stroke-width="${edge.id === state.selectedEdgeId ? 3.5 : edge.type === "free" ? 2.4 : 2}" ${
+        dash ? `stroke-dasharray="${dash}"` : ""
+      } />`;
+    }
     if (edge.label) {
       appliquerTexteLienParDefaut(edge);
-      const align = getTextAlignForEdge(edge);
-      const baseX = route.mid.x - bounds.x;
-      const x = align === "left" ? baseX - 54 : align === "right" ? baseX + 54 : baseX;
-      const textNode = `<text x="${x}" y="${route.mid.y - bounds.y - 8}" class="edge-label" text-anchor="${svgAnchorForAlign(
-        align,
-      )}" dominant-baseline="middle" font-family="Avenir Next, Segoe UI, sans-serif" font-size="12" font-weight="${
+      const x = route.mid.x - bounds.x;
+      const y = route.mid.y - bounds.y;
+      const textNode = `<text x="${x}" y="${y}" class="edge-label" text-anchor="middle" dominant-baseline="middle" font-family="Avenir Next, Segoe UI, sans-serif" font-size="12" font-weight="${
         isTextBold(edge) ? "700" : "500"
       }" font-style="${isTextItalic(edge) ? "italic" : "normal"}" fill="#2a3140">${
         escapeXml(edge.label)
       }</text>`;
+      const labelNode = textNode;
       const edgeLink = getExportLink(edge.titleLink, edge.label);
       if (withLinks && edgeLink) {
-        svg += `<a href="${escapeXml(edgeLink)}" target="_blank" rel="noopener noreferrer">${textNode}</a>`;
+        svg += `<a href="${escapeXml(edgeLink)}" target="_blank" rel="noopener noreferrer">${labelNode}</a>`;
       } else {
-        svg += textNode;
+        svg += labelNode;
       }
     }
     addPathSegments(route.points, occupied);
@@ -2792,15 +3936,14 @@ function collectPdfLinkOverlays(bounds, nodeIds) {
       appliquerTexteLienParDefaut(edge);
       const edgeLink = getExportLink(edge.titleLink, edge.label);
       if (edgeLink) {
-        const align = getTextAlignForEdge(edge);
-        const baseX = route.mid.x - bounds.x;
-        const x = align === "left" ? baseX - 54 : align === "right" ? baseX + 54 : baseX;
+        const x = route.mid.x - bounds.x;
+        const y = route.mid.y - bounds.y;
         const width = Math.max(54, Math.min(480, edge.label.length * 7 + 28));
-        const left = align === "left" ? x : align === "right" ? x - width : x - width / 2;
+        const left = x - width / 2;
         overlays.push({
           href: edgeLink,
           left,
-          top: route.mid.y - bounds.y - 20,
+          top: y - 12,
           width,
           height: 24,
         });
@@ -2827,7 +3970,9 @@ function collectPdfLinkOverlays(bounds, nodeIds) {
 }
 
 function exportPdf() {
-  const { bounds, nodeIds, transparent } = getExportContext();
+  const context = getExportContext();
+  if (!context) return false;
+  const { bounds, nodeIds, transparent } = context;
   const isLandscape = bounds.width >= bounds.height;
   const pageSize = isLandscape ? "297mm 210mm" : "210mm 297mm";
   const svgMarkup = buildSvgMarkup(bounds, nodeIds, transparent, false);
@@ -2842,7 +3987,7 @@ function exportPdf() {
     })
     .join("");
   const popup = window.open("", "_blank");
-  if (!popup) return;
+  if (!popup) return false;
   popup.document.write(`
     <!doctype html>
     <html lang="fr">
@@ -2919,13 +4064,17 @@ function exportPdf() {
     </html>
   `);
   popup.document.close();
+  return true;
 }
 
 function exportSvg() {
-  const { bounds, nodeIds, transparent } = getExportContext();
+  const context = getExportContext();
+  if (!context) return false;
+  const { bounds, nodeIds, transparent } = context;
   const svg = `<?xml version="1.0" encoding="UTF-8"?>${buildSvgMarkup(bounds, nodeIds, transparent, false)}`;
   const blob = new Blob([svg], { type: "image/svg+xml" });
   downloadBlob(blob, "mindmap.svg");
+  return true;
 }
 
 function roundRect(ctx, x, y, w, h, r, fill) {
@@ -2960,6 +4109,7 @@ function escapeXml(value) {
 
 function renderNodes() {
   const fragment = document.createDocumentFragment();
+  const selectedSet = new Set(getSelectedNodeIds());
 
   for (const node of state.graph.nodes) {
     appliquerStyleParDefaut(node);
@@ -3021,8 +4171,11 @@ function renderNodes() {
       title.style.textDecorationThickness = node.titleLink ? "1.5px" : "0px";
     }
 
-    if (node.id === state.selectedNodeId) {
+    if (selectedSet.has(node.id)) {
       element.classList.add("selected");
+      if (state.selectionRect && state.selectionRect.active) {
+        element.classList.add("selection-preview");
+      }
     }
     if (state.linkDraft && state.linkDraft.sourceId === node.id) {
       element.classList.add("linking-source");
@@ -3042,6 +4195,53 @@ function renderNodes() {
   els.nodes.replaceChildren(fragment);
 }
 
+function renderGroupLayer() {
+  if (typeof groupRender.renderGroupLayer === "function") {
+    const done = groupRender.renderGroupLayer({
+      groupLayer: els.groupLayer,
+      groupTitleLayer: els.groupTitleLayer,
+      nodes: state.graph.nodes,
+      ensureGraphGroups,
+      boundsForNodeIds,
+      getGroupMeta,
+    });
+    if (done) return;
+  }
+  if (!els.groupLayer) return;
+  const fragment = document.createDocumentFragment();
+  ensureGraphGroups();
+  const groupedNodes = state.graph.nodes.filter((node) => node.groupId);
+  const byGroup = new Map();
+  for (const node of groupedNodes) {
+    if (!byGroup.has(node.groupId)) byGroup.set(node.groupId, []);
+    byGroup.get(node.groupId).push(node);
+  }
+  for (const [groupId, members] of byGroup.entries()) {
+    if (!members.length) continue;
+    const bounds = boundsForNodeIds(members.map((node) => node.id));
+    if (!bounds) continue;
+    const pad = 16;
+    const box = document.createElement("div");
+    box.className = "group-box";
+    box.dataset.groupId = groupId;
+    box.style.left = `${bounds.left - pad}px`;
+    box.style.top = `${bounds.top - pad}px`;
+    box.style.width = `${bounds.width + pad * 2}px`;
+    box.style.height = `${bounds.height + pad * 2}px`;
+    const meta = getGroupMeta(groupId);
+    if (meta) {
+      box.style.background = meta.color;
+      const title = document.createElement("div");
+      title.className = "group-box-title";
+      title.dataset.groupId = groupId;
+      title.textContent = meta.title || "Groupe";
+      box.appendChild(title);
+    }
+    fragment.appendChild(box);
+  }
+  els.groupLayer.replaceChildren(fragment);
+}
+
 function renderEdges() {
   const mapSize = computeMapSize();
   els.edges.setAttribute("width", String(mapSize.width));
@@ -3051,9 +4251,15 @@ function renderEdges() {
   els.nodes.style.height = `${mapSize.height}px`;
 
   const fragment = document.createDocumentFragment();
-  const occupied = [];
+  const occupiedByScope = new Map();
+  const occupiedForScope = (scopeKey) => {
+    if (!occupiedByScope.has(scopeKey)) occupiedByScope.set(scopeKey, []);
+    return occupiedByScope.get(scopeKey);
+  };
   const routeCache = new Map();
   for (const edge of state.graph.edges) {
+    const scopeKey = edgeRoutingScopeKey(edge);
+    const occupied = occupiedForScope(scopeKey);
     const route = computeEdgeRoute(edge, occupied);
     if (!route) continue;
     routeCache.set(edge.id, route);
@@ -3065,26 +4271,29 @@ function renderEdges() {
     hitPath.dataset.edgeId = edge.id;
     fragment.appendChild(hitPath);
 
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", edgePathDataForShape(route.points, getEdgeShape(edge)));
-    path.setAttribute("fill", "none");
-    path.setAttribute("stroke", getEdgeColor(edge));
-    path.setAttribute("stroke-width", edge.id === state.selectedEdgeId ? "3.5" : edge.type === "free" ? "2.3" : "2");
-    path.setAttribute("stroke-dasharray", getEdgeDashArray(edge));
-    path.setAttribute("class", `edge-path ${edge.id === state.selectedEdgeId ? "selected" : ""}`.trim());
-    path.dataset.edgeId = edge.id;
-    fragment.appendChild(path);
+    const segments = edge.label ? splitPolylineForLabel(route.points, estimateEdgeLabelGap(edge)) : [route.points];
+    for (const segment of segments) {
+      if (!segment || segment.length < 2) continue;
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", edgePathDataForShape(segment, getEdgeShape(edge)));
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke", getEdgeColor(edge));
+      path.setAttribute("stroke-width", edge.id === state.selectedEdgeId ? "3.5" : edge.type === "free" ? "2.3" : "2");
+      path.setAttribute("stroke-dasharray", getEdgeDashArray(edge));
+      path.setAttribute("class", `edge-path ${edge.id === state.selectedEdgeId ? "selected" : ""}`.trim());
+      path.dataset.edgeId = edge.id;
+      fragment.appendChild(path);
+    }
 
     if (edge.label) {
       appliquerTexteLienParDefaut(edge);
-      const align = getTextAlignForEdge(edge);
-      const labelBaseX = route.mid.x;
-      const labelX = align === "left" ? labelBaseX - 54 : align === "right" ? labelBaseX + 54 : labelBaseX;
+      const labelX = route.mid.x;
+      const labelY = route.mid.y;
       const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
       label.setAttribute("x", String(labelX));
-      label.setAttribute("y", String(route.mid.y - 8));
+      label.setAttribute("y", String(labelY));
       label.setAttribute("class", "edge-label");
-      label.setAttribute("text-anchor", svgAnchorForAlign(align));
+      label.setAttribute("text-anchor", "middle");
       label.setAttribute("font-weight", isTextBold(edge) ? "700" : "500");
       label.setAttribute("font-style", isTextItalic(edge) ? "italic" : "normal");
       if (edge.titleLink) label.setAttribute("text-decoration", "underline");
@@ -3113,13 +4322,15 @@ function renderEdges() {
 }
 
 function renderControls() {
-  const nodeSelected = Boolean(state.selectedNodeId);
+  const selectedIds = getSelectedNodeIds();
+  const nodeSelected = selectedIds.length > 0;
+  const singleNodeSelected = selectedIds.length === 1;
   const edgeSelected = Boolean(state.selectedEdgeId);
   const hasNodes = state.graph.nodes.length > 0;
   const snapshot = history.snapshot();
 
   if (nodeSelected) {
-    const node = getNode(state.selectedNodeId);
+    const node = getNode(selectedIds[0]);
     if (node) {
       appliquerStyleParDefaut(node);
       els.titleInput.value = node.title || "";
@@ -3158,15 +4369,16 @@ function renderControls() {
   els.undoBtn.disabled = !history.canUndo();
   els.redoBtn.disabled = !history.canRedo();
   const selectedNode = nodeSelected ? getNode(state.selectedNodeId) : null;
-  const canAddChild = Boolean(selectedNode) && !isPostitNode(selectedNode);
-  els.addChildBtn.disabled = !canAddChild;
+  const canAddChild = singleNodeSelected && Boolean(selectedNode) && !isPostitNode(selectedNode);
+  if (els.addChildBtn) els.addChildBtn.disabled = !canAddChild;
   if (els.qaAddChildBtn) els.qaAddChildBtn.disabled = !canAddChild;
   els.deleteEdgeBtn.disabled = !edgeSelected;
   els.edgeTitleInput.disabled = !edgeSelected;
   els.edgeColorInput.disabled = !edgeSelected;
   els.edgeStyleSelect.disabled = !edgeSelected;
-  els.deleteBtn.disabled = !nodeSelected && !edgeSelected;
-  els.titleInput.disabled = !nodeSelected;
+  if (els.edgeTitleBgColorInput) els.edgeTitleBgColorInput.disabled = !edgeSelected;
+  if (els.deleteBtn) els.deleteBtn.disabled = !nodeSelected && !edgeSelected;
+  els.titleInput.disabled = !singleNodeSelected;
   els.textColorInput.disabled = !nodeSelected;
   els.colorInput.disabled = !nodeSelected;
   els.borderColorInput.disabled = !nodeSelected;
@@ -3175,8 +4387,11 @@ function renderControls() {
   if (els.nodeTitleCenterBtn) els.nodeTitleCenterBtn.disabled = !nodeSelected;
   if (els.nodeTitleBoldBtn) els.nodeTitleBoldBtn.disabled = !nodeSelected;
   if (els.nodeTitleItalicBtn) els.nodeTitleItalicBtn.disabled = !nodeSelected;
-  if (els.nodeTitleLinkInput) els.nodeTitleLinkInput.disabled = !nodeSelected;
-
+  if (els.nodeTitleLinkInput) els.nodeTitleLinkInput.disabled = !singleNodeSelected;
+  if (els.rectSelectBtn) {
+    els.rectSelectBtn.classList.toggle("is-active", state.rectSelectMode);
+  }
+  syncRectSelectCursor();
   if (edgeSelected) {
     const edge = getEdge(state.selectedEdgeId);
     if (edge) {
@@ -3186,6 +4401,9 @@ function renderControls() {
       els.edgeStyleSelect.value = getEdgeStyle(edge);
       if (els.edgeTitleLinkInput) {
         els.edgeTitleLinkInput.value = edge.titleLink || "";
+      }
+      if (els.edgeTitleBgColorInput) {
+        els.edgeTitleBgColorInput.value = getEdgeLabelBackground(edge) || "#ffffff";
       }
       if (els.edgeTitleCenterBtn) {
         els.edgeTitleCenterBtn.classList.toggle("is-active", getTextAlignForEdge(edge) === "center");
@@ -3199,6 +4417,7 @@ function renderControls() {
     }
   } else {
     if (els.edgeTitleLinkInput) els.edgeTitleLinkInput.value = "";
+    if (els.edgeTitleBgColorInput) els.edgeTitleBgColorInput.value = "#ffffff";
     if (els.edgeTitleCenterBtn) els.edgeTitleCenterBtn.classList.remove("is-active");
     if (els.edgeTitleBoldBtn) els.edgeTitleBoldBtn.classList.remove("is-active");
     if (els.edgeTitleItalicBtn) els.edgeTitleItalicBtn.classList.remove("is-active");
@@ -3208,7 +4427,24 @@ function renderControls() {
   if (els.edgeTitleItalicBtn) els.edgeTitleItalicBtn.disabled = !edgeSelected;
   if (els.edgeTitleLinkInput) els.edgeTitleLinkInput.disabled = !edgeSelected;
 
-  const currentShape = normalizeEdgeShape(state.defaultEdgeShape);
+  const activeGroupId = selectedGroupId();
+  const resolvedModes = typeof groupStateUtils.resolveActiveModes === "function"
+    ? groupStateUtils.resolveActiveModes({
+      activeGroupId,
+      preferredLayout: state.preferredLayout,
+      defaultEdgeShape: state.defaultEdgeShape,
+      getGroupUiPrefs,
+      normalizeLayoutMode,
+      normalizeEdgeShape,
+      dominantEdgeShapeForGroup,
+    })
+    : null;
+  const currentShape = resolvedModes
+    ? resolvedModes.edgeShape
+    : activeGroupId
+      ? ((getGroupUiPrefs(activeGroupId) && getGroupUiPrefs(activeGroupId).edgeShape)
+        || dominantEdgeShapeForGroup(activeGroupId))
+      : normalizeEdgeShape(state.defaultEdgeShape);
   if (els.edgeShapeGeoBtn) {
     const isActive = currentShape === "geometrique";
     els.edgeShapeGeoBtn.classList.toggle("is-active", isActive);
@@ -3227,7 +4463,12 @@ function renderControls() {
 
   els.undoBtn.title = `Annuler (${snapshot.undo})`;
   els.redoBtn.title = `Rétablir (${snapshot.redo})`;
-  const currentLayout = state.preferredLayout || "horizontal";
+  const currentLayout = resolvedModes
+    ? resolvedModes.layout
+    : activeGroupId
+      ? ((getGroupUiPrefs(activeGroupId) && getGroupUiPrefs(activeGroupId).layout)
+        || normalizeLayoutMode(state.preferredLayout || "horizontal"))
+      : normalizeLayoutMode(state.preferredLayout || "horizontal");
   els.layoutHorizontalBtn.classList.toggle("is-active", currentLayout === "horizontal");
   els.layoutVerticalBtn.classList.toggle("is-active", currentLayout === "vertical");
   els.layoutRadialBtn.classList.toggle("is-active", currentLayout === "radial");
@@ -3240,7 +4481,8 @@ function renderControls() {
 }
 
 function renderQuickActions() {
-  const node = state.selectedNodeId ? getNode(state.selectedNodeId) : null;
+  const selectedIds = getSelectedNodeIds();
+  const node = selectedIds.length === 1 && state.selectedNodeId ? getNode(state.selectedNodeId) : null;
   const show = Boolean(node) && !isPostitNode(node) && !state.selectedEdgeId && !state.inlineEditNodeId;
   els.quickActions.hidden = !show;
   if (!show) return;
@@ -3312,12 +4554,85 @@ function maybeAutoPanWhileDragging(clientX, clientY) {
 }
 
 function render() {
+  renderGroupLayer();
   renderEdges();
   renderNodes();
   renderControls();
   renderQuickActions();
+  renderGroupQuickActions();
   renderEdgeQuickActions();
+  renderSelectionRect();
   renderViewport();
+}
+
+function renderSelectionRect() {
+  if (typeof groupRender.renderSelectionRect === "function") {
+    const done = groupRender.renderSelectionRect({
+      selectionRectEl: els.selectionRect,
+      selectionRect: state.selectionRect,
+      rectFromPoints,
+    });
+    if (done) return;
+  }
+  if (!els.selectionRect) return;
+  const rect = state.selectionRect;
+  if (!rect || !rect.active) {
+    els.selectionRect.hidden = true;
+    return;
+  }
+  const visual = rectFromPoints(rect.start, rect.current);
+  els.selectionRect.hidden = false;
+  els.selectionRect.style.left = `${visual.left}px`;
+  els.selectionRect.style.top = `${visual.top}px`;
+  els.selectionRect.style.width = `${visual.width}px`;
+  els.selectionRect.style.height = `${visual.height}px`;
+}
+
+function renderGroupQuickActions() {
+  if (typeof groupRender.renderGroupQuickActions === "function") {
+    const done = groupRender.renderGroupQuickActions({
+      els,
+      selectedGroupId,
+      openGroupEditorId: () => state.groupEditorGroupId || "",
+      nodes: state.graph.nodes,
+      getGroupMeta,
+      quickActionsAnchorForMembers: groupUtils.quickActionsAnchorForMembers,
+      getNodeWidth,
+      viewportZoom: state.viewport.zoom,
+    });
+    if (done) return;
+  }
+  if (!els.groupQuickActions || !els.groupTitleInput || !els.groupColorInput) return;
+  const groupId = state.groupEditorGroupId || "";
+  if (!groupId) {
+    els.groupQuickActions.hidden = true;
+    return;
+  }
+  const members = state.graph.nodes.filter((node) => node.groupId === groupId);
+  if (!members.length) {
+    els.groupQuickActions.hidden = true;
+    return;
+  }
+  const meta = getGroupMeta(groupId);
+  if (meta) {
+    if (document.activeElement !== els.groupTitleInput) {
+      els.groupTitleInput.value = meta.title || "Groupe";
+    }
+    if (document.activeElement !== els.groupColorInput) {
+      els.groupColorInput.value = meta.color || "#eef3ff";
+    }
+  }
+  els.groupQuickActions.hidden = false;
+  const anchor = typeof groupUtils.quickActionsAnchorForMembers === "function"
+    ? groupUtils.quickActionsAnchorForMembers(members, getNodeWidth)
+    : null;
+  const left = anchor ? anchor.left : 8;
+  const top = anchor ? anchor.top : 8;
+  els.groupQuickActions.style.left = `${left}px`;
+  els.groupQuickActions.style.top = `${top}px`;
+  const invZoom = 1 / Math.max(0.25, state.viewport.zoom || 1);
+  els.groupQuickActions.style.transformOrigin = "top left";
+  els.groupQuickActions.style.transform = `scale(${invZoom})`;
 }
 
 function onNodePointerDown(event) {
@@ -3348,6 +4663,10 @@ function onNodePointerDown(event) {
   if (!isPostitNode(node)) {
     event.preventDefault();
   }
+  if (event.metaKey || event.ctrlKey) {
+    selectNode(nodeId, { toggle: true, includeGroup: false });
+    return;
+  }
 
   if (isNodeLockedByOther(nodeId)) {
     const owner = getLockOwner(nodeId);
@@ -3355,12 +4674,28 @@ function onNodePointerDown(event) {
     return;
   }
 
-  selectNode(nodeId);
+  const currentSelection = getSelectedNodeIds();
+  if (!currentSelection.includes(nodeId)) {
+    selectNode(nodeId);
+  }
+
+  // Node drag should stay local, even when node belongs to a group.
+  const finalDragIds = [nodeId];
+  if (!finalDragIds.length) return;
 
   const world = toWorld(event.clientX, event.clientY);
   state.draggingNodeId = nodeId;
+  state.draggingNodeIds = finalDragIds.slice();
+  state.draggingGroupId = "";
   state.dragActivated = isPostitNode(node) && onPostitGrip;
   state.dragStartClient = { x: event.clientX, y: event.clientY };
+  state.dragStartWorld = { x: world.x, y: world.y };
+  state.dragNodeStartPositions = new Map(
+    finalDragIds.map((id) => {
+      const current = getNode(id);
+      return [id, { x: current ? current.x : 0, y: current ? current.y : 0 }];
+    }),
+  );
   state.dragOffset.x = world.x - node.x;
   state.dragOffset.y = world.y - node.y;
 
@@ -3383,11 +4718,21 @@ function onNodePointerMove(event) {
     requestRender();
     return;
   }
-  if (!state.draggingNodeId) return;
+  if (!state.draggingNodeId || !state.dragNodeStartPositions || !state.dragStartWorld) return;
   const nodeId = state.draggingNodeId;
   const node = getNode(nodeId);
   if (!node) return;
-  if (isPostitNode(node)) {
+  let dragIds = state.draggingNodeIds.length ? state.draggingNodeIds : [nodeId];
+  if (state.draggingGroupId) {
+    dragIds = dragIds.filter((id) => {
+      const n = getNode(id);
+      return Boolean(n && n.groupId === state.draggingGroupId);
+    });
+  }
+  if (!dragIds.length) {
+    dragIds = [nodeId];
+  }
+  if (dragIds.some((id) => isPostitNode(getNode(id)))) {
     maybeAutoPanWhileDragging(event.clientX, event.clientY);
   }
 
@@ -3403,21 +4748,30 @@ function onNodePointerMove(event) {
   }
 
   const world = toWorld(event.clientX, event.clientY);
-  const rawX = isPostitNode(node) ? world.x - state.dragOffset.x : Math.max(20, world.x - state.dragOffset.x);
-  const rawY = isPostitNode(node) ? world.y - state.dragOffset.y : Math.max(20, world.y - state.dragOffset.y);
-  if (isPostitNode(node)) {
-    node.x = rawX;
-    node.y = rawY;
-    const el = els.nodes.querySelector(`.node[data-id="${nodeId}"]`);
-    if (el) {
-      el.style.left = `${rawX}px`;
-      el.style.top = `${rawY}px`;
+  const dx = world.x - state.dragStartWorld.x;
+  const dy = world.y - state.dragStartWorld.y;
+  const multi = dragIds.length > 1;
+  for (const id of dragIds) {
+    const target = getNode(id);
+    const start = state.dragNodeStartPositions.get(id);
+    if (!target || !start) continue;
+    const rawX = start.x + dx;
+    const rawY = start.y + dy;
+    if (!multi && !isPostitNode(target)) {
+      const snapped = magnetiserPositionNoeud(id, rawX, rawY);
+      target.x = snapped.x;
+      target.y = snapped.y;
+    } else {
+      target.x = rawX;
+      target.y = rawY;
     }
-    return;
-  } else {
-    const snapped = magnetiserPositionNoeud(nodeId, rawX, rawY);
-    node.x = snapped.x;
-    node.y = snapped.y;
+    if (isPostitNode(target)) {
+      const el = els.nodes.querySelector(`.node[data-id="${id}"]`);
+      if (el) {
+        el.style.left = `${target.x}px`;
+        el.style.top = `${target.y}px`;
+      }
+    }
   }
   requestRender();
 }
@@ -3437,19 +4791,75 @@ function onNodePointerUp() {
     return;
   }
   if (!state.draggingNodeId) return;
-  const movedId = state.draggingNodeId;
+  const movedIds = state.draggingNodeIds.length ? state.draggingNodeIds.slice() : [state.draggingNodeId];
   const moved = state.dragActivated;
   state.draggingNodeId = null;
+  state.draggingNodeIds = [];
+  state.draggingGroupId = null;
   state.dragActivated = false;
   state.dragStartClient = null;
+  state.dragStartWorld = null;
+  state.dragNodeStartPositions = null;
   if (!moved) return;
   commit(() => {
-    const node = getNode(movedId);
-    if (node) {
+    for (const movedId of movedIds) {
+      const node = getNode(movedId);
+      if (!node) continue;
       node.x = Math.round(node.x);
       node.y = Math.round(node.y);
     }
   }, "Nœud déplacé");
+}
+
+function onGroupPointerDown(event) {
+  const editBtn = event.target.closest(".group-edit-btn");
+  if (editBtn && editBtn.dataset.groupId) {
+    return;
+  }
+  const el = event.target.closest(".group-box-title, .group-box");
+  if (!el || !el.dataset.groupId) return;
+  const groupId = el.dataset.groupId;
+  if (event.metaKey || event.ctrlKey) return;
+  const ids = state.graph.nodes.filter((node) => node.groupId === groupId).map((node) => node.id);
+  if (!ids.length) return;
+  event.preventDefault();
+  event.stopPropagation();
+  setSelectedNodeIds(ids);
+  state.selectedEdgeId = null;
+  const drag = typeof groupInteractions.startGroupDrag === "function"
+    ? groupInteractions.startGroupDrag({
+      groupId,
+      ids,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      toWorld,
+      getNode,
+    })
+    : null;
+  if (drag) {
+    state.draggingGroupId = drag.draggingGroupId;
+    state.draggingNodeId = drag.draggingNodeId;
+    state.draggingNodeIds = drag.draggingNodeIds;
+    state.dragActivated = drag.dragActivated;
+    state.dragStartClient = drag.dragStartClient;
+    state.dragStartWorld = drag.dragStartWorld;
+    state.dragNodeStartPositions = drag.dragNodeStartPositions;
+  } else {
+    const world = toWorld(event.clientX, event.clientY);
+    state.draggingGroupId = groupId;
+    state.draggingNodeId = ids[0];
+    state.draggingNodeIds = ids.slice();
+    state.dragActivated = false;
+    state.dragStartClient = { x: event.clientX, y: event.clientY };
+    state.dragStartWorld = { x: world.x, y: world.y };
+    state.dragNodeStartPositions = new Map(
+      ids.map((id) => {
+        const current = getNode(id);
+        return [id, { x: current ? current.x : 0, y: current ? current.y : 0 }];
+      }),
+    );
+  }
+  requestRender();
 }
 
 function startInlineEdit(nodeId) {
@@ -3462,7 +4872,7 @@ function startInlineEdit(nodeId) {
   }
   state.inlineEditNodeId = nodeId;
   state.inlineEditIsPostit = isPostitNode(node);
-  state.selectedNodeId = nodeId;
+  setSelectedNodeIds([nodeId]);
   state.selectedEdgeId = null;
   requestRender();
 
@@ -3520,10 +4930,70 @@ function onCanvasPointerDown(event) {
   const path = typeof event.composedPath === "function" ? event.composedPath() : [];
   const inNodeQuickActions = path.includes(els.quickActions);
   const inEdgeQuickActions = path.includes(els.edgeQuickActions);
+  const inGroupQuickActions = els.groupQuickActions ? path.includes(els.groupQuickActions) : false;
+  const hitGroupTitle = Boolean(event.target.closest(".group-box-title"));
+  const hitGroupBox = Boolean(event.target.closest(".group-box"));
   const hitNode = event.target.closest(".node");
-  const hitEdge = event.target.closest(".edge-hit, .edge-path, .edge-label");
+  const hitEdge = event.target.closest(".edge-hit, .edge-path, .edge-label, .edge-label-bg");
   const hitQuickActions = inNodeQuickActions || event.target.closest(".node-quick-actions");
   const hitEdgeQuickActions = inEdgeQuickActions || event.target.closest(".edge-quick-actions");
+  if (inGroupQuickActions) return;
+  const world = toWorld(event.clientX, event.clientY);
+  if (!state.rectSelectMode && !state.spacePressed && !hitNode && !hitEdge && !hitQuickActions && !hitEdgeQuickActions) {
+    const hitTitleGroupId = findGroupTitleAtPoint(world);
+    const hitGroupId = hitTitleGroupId || findGroupZoneAtPoint(world);
+    if (hitGroupId) {
+      const ids = state.graph.nodes.filter((node) => node.groupId === hitGroupId).map((node) => node.id);
+      if (ids.length) {
+        setSelectedNodeIds(ids);
+        state.activeGroupId = hitTitleGroupId ? hitGroupId : "";
+        state.selectedEdgeId = null;
+        const drag = typeof groupInteractions.startGroupDrag === "function"
+          ? groupInteractions.startGroupDrag({
+            groupId: hitGroupId,
+            ids,
+            clientX: event.clientX,
+            clientY: event.clientY,
+            toWorld,
+            getNode,
+          })
+          : null;
+        if (drag) {
+          state.draggingGroupId = drag.draggingGroupId;
+          state.draggingNodeId = drag.draggingNodeId;
+          state.draggingNodeIds = drag.draggingNodeIds;
+          state.dragActivated = drag.dragActivated;
+          state.dragStartClient = drag.dragStartClient;
+          state.dragStartWorld = drag.dragStartWorld;
+          state.dragNodeStartPositions = drag.dragNodeStartPositions;
+        } else {
+          state.draggingGroupId = hitGroupId;
+          state.draggingNodeId = ids[0];
+          state.draggingNodeIds = ids.slice();
+          state.dragActivated = false;
+          state.dragStartClient = { x: event.clientX, y: event.clientY };
+          state.dragStartWorld = { x: world.x, y: world.y };
+          state.dragNodeStartPositions = new Map(
+            ids.map((id) => {
+              const current = getNode(id);
+              return [id, { x: current ? current.x : 0, y: current ? current.y : 0 }];
+            }),
+          );
+        }
+        requestRender();
+        return;
+      }
+    }
+  }
+  if (state.rectSelectMode && !state.spacePressed && !hitNode && !hitEdge && !hitQuickActions && !hitEdgeQuickActions) {
+    state.selectionRect = typeof groupInteractions.startSelectionRect === "function"
+      ? groupInteractions.startSelectionRect(world)
+      : { active: true, start: world, current: world };
+    state.selectedEdgeId = null;
+    setSelectedNodeIds([]);
+    requestRender();
+    return;
+  }
   if (state.linkDraft && !hitNode) {
     finishLinkDraft(null);
     return;
@@ -3544,6 +5014,28 @@ function onCanvasPointerDown(event) {
 }
 
 function onCanvasPointerMove(event) {
+  if (state.selectionRect && state.selectionRect.active) {
+    const world = toWorld(event.clientX, event.clientY);
+    if (typeof groupInteractions.updateSelectionRect === "function") {
+      const result = groupInteractions.updateSelectionRect(
+        state.selectionRect,
+        world,
+        state.graph.nodes,
+        nodeInRect,
+        rectFromPoints,
+      );
+      state.selectionRect = result.rect || state.selectionRect;
+      setSelectedNodeIds(result.ids || []);
+    } else {
+      state.selectionRect.current = world;
+      const rect = rectFromPoints(state.selectionRect.start, world);
+      const ids = state.graph.nodes.filter((node) => nodeInRect(node, rect)).map((node) => node.id);
+      setSelectedNodeIds(ids);
+    }
+    state.selectedEdgeId = null;
+    requestRender();
+    return;
+  }
   if (state.linkDraft) {
     state.linkDraftCursor = toWorld(event.clientX, event.clientY);
     requestRender();
@@ -3555,6 +5047,26 @@ function onCanvasPointerMove(event) {
 }
 
 function onCanvasPointerUp() {
+  if (state.selectionRect && state.selectionRect.active) {
+    const ids = typeof groupInteractions.finishSelectionRect === "function"
+      ? groupInteractions.finishSelectionRect(state.selectionRect, state.graph.nodes, nodeInRect, rectFromPoints)
+      : state.graph.nodes
+        .filter((node) => nodeInRect(node, rectFromPoints(state.selectionRect.start, state.selectionRect.current)))
+        .map((node) => node.id);
+    setSelectedNodeIds(ids);
+    state.selectedEdgeId = null;
+    const shouldAutoGroup = ids.length >= 2;
+    if (shouldAutoGroup) {
+      groupSelectedNodes();
+      setSelectedNodeIds(ids);
+    }
+    state.selectionRect.active = false;
+    state.rectSelectMode = false;
+    if (els.rectSelectBtn) els.rectSelectBtn.classList.remove("is-active");
+    syncRectSelectCursor();
+    requestRender();
+    return;
+  }
   state.isPanning = false;
   state.panStart = null;
   els.canvas.classList.remove("panning");
@@ -3607,6 +5119,29 @@ function onKeyDown(event) {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") {
     event.preventDefault();
     redo();
+    return;
+  }
+
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "g") {
+    event.preventDefault();
+    if (event.shiftKey) {
+      ungroupSelectedNodes();
+    } else {
+      groupSelectedNodes();
+    }
+    return;
+  }
+
+  if (event.key.toLowerCase() === "r" && event.altKey) {
+    event.preventDefault();
+    state.rectSelectMode = !state.rectSelectMode;
+    if (els.rectSelectBtn) els.rectSelectBtn.classList.toggle("is-active", state.rectSelectMode);
+    syncRectSelectCursor();
+    if (!state.rectSelectMode && state.selectionRect) {
+      state.selectionRect.active = false;
+      if (els.selectionRect) els.selectionRect.hidden = true;
+    }
+    requestRender();
     return;
   }
 
@@ -3680,20 +5215,40 @@ async function boot() {
       await syncCloudToLocal();
     } catch {
       setStatus("Cloud indisponible, mode local actif", true);
+      persistLog("boot:cloud-sync-failed", {});
     }
   }
 
   let projects = await listProjectsFromDb();
+  persistLog("boot:projects-from-db", { count: projects.length });
 
   if (!projects.length) {
-    let seedGraph = createDefaultGraph();
+    let seedPayload = {
+      version: 1,
+      currentZoneId: "zone-1",
+      zones: [
+        {
+          id: "zone-1",
+          name: "Zone 1",
+          graph: createDefaultGraph(),
+          preferredLayout: "horizontal",
+          defaultEdgeShape: "geometrique",
+          defaultEdgeStyle: "dotted",
+          defaultEdgeColor: "#e15d44",
+        },
+      ],
+    };
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       try {
         const parsed = JSON.parse(raw);
-        const validated = core.validateAndNormalizeData(parsed);
-        if (validated.ok) {
-          seedGraph = validated.data;
+        const parsedZones = parseProjectZones(parsed, "horizontal", "geometrique");
+        if (parsedZones.zones.length) {
+          seedPayload = {
+            version: 1,
+            currentZoneId: parsedZones.currentZoneId || parsedZones.zones[0].id,
+            zones: parsedZones.zones,
+          };
         }
       } catch {
       }
@@ -3702,7 +5257,7 @@ async function boot() {
     await putProjectToDb(toProjectRecord({
       id: firstId,
       name: "Projet 1",
-      graph: seedGraph,
+      graph: seedPayload,
       preferredLayout: state.preferredLayout,
       defaultEdgeShape: state.defaultEdgeShape,
     }));
@@ -3719,18 +5274,44 @@ async function boot() {
     project = projects[0] || null;
   }
   if (project && loadProjectIntoState(project, "")) {
+    persistLog("boot:project-loaded", {
+      projectId: state.currentProjectId,
+      zones: state.zones.length,
+      groupedNodes: countGroupedNodesInZones(state.zones),
+      projectUpdatedAt: project.updatedAt || "",
+    });
+    restoreFromLocalStorageIfNewer(project);
+    persistLog("boot:after-restore-check", {
+      projectId: state.currentProjectId,
+      zones: state.zones.length,
+      groupedNodes: countGroupedNodesInZones(state.zones),
+    });
     state.lastSavedHash = graphHash();
     await joinRealtimeChannelForProject(state.currentProjectId);
     return;
   }
 
-  state.graph = createDefaultGraph();
-  resetRealtimeVersionState(state.graph);
-  state.lastSavedHash = graphHash();
-  state.defaultEdgeShape = deriveDefaultEdgeShapeFromGraph();
-  state.selectedNodeId = null;
-  state.selectedEdgeId = null;
+  const fallbackZone = zoneFromRecord(
+    {
+      id: makeZoneId(),
+      name: "Zone 1",
+      graph: createDefaultGraph(),
+      preferredLayout: "horizontal",
+      defaultEdgeShape: "geometrique",
+      defaultEdgeStyle: "dotted",
+      defaultEdgeColor: "#e15d44",
+    },
+    "Zone 1",
+    "horizontal",
+    "geometrique",
+    "solid",
+    "#e15d44",
+  );
+  state.zones = fallbackZone ? [fallbackZone] : [];
+  state.currentZoneId = fallbackZone ? fallbackZone.id : null;
+  if (fallbackZone) applyZoneToState(fallbackZone, "");
   refreshProjectUi();
+  refreshZoneUi();
   requestRender();
   await joinRealtimeChannelForProject(state.currentProjectId);
 }
@@ -3747,12 +5328,18 @@ els.nodes.addEventListener("click", (event) => {
       return;
     }
   }
+  if (event.metaKey || event.ctrlKey) {
+    return;
+  }
   if (state.linkDraft) {
     finishLinkDraft(nodeEl.dataset.id);
     return;
   }
   if (state.inlineEditNodeId === nodeEl.dataset.id) return;
-  onNodeClick(nodeEl.dataset.id);
+  onNodeClick(nodeEl.dataset.id, {
+    toggle: Boolean(event.metaKey || event.ctrlKey),
+    includeGroup: false,
+  });
 });
 
 els.nodes.addEventListener("dblclick", (event) => {
@@ -3863,7 +5450,7 @@ els.nodes.addEventListener("pointerdown", (event) => {
 });
 
 function selectEdgeFromEvent(event) {
-  const edgeEl = event.target.closest(".edge-hit, .edge-path, .edge-label");
+  const edgeEl = event.target.closest(".edge-hit, .edge-path, .edge-label, .edge-label-bg");
   if (!edgeEl || !edgeEl.dataset.edgeId) return;
   if ((event.metaKey || event.ctrlKey) && event.target.closest(".edge-label")) {
     const edge = getEdge(edgeEl.dataset.edgeId);
@@ -3877,8 +5464,62 @@ function selectEdgeFromEvent(event) {
   selectEdge(edgeEl.dataset.edgeId);
 }
 
+function selectGroupFromEvent(event) {
+  if (event.defaultPrevented) return;
+  const el = event.target.closest(".group-box-title, .group-box");
+  if (!el || !el.dataset.groupId) return;
+  const ids = state.graph.nodes.filter((node) => node.groupId === el.dataset.groupId).map((node) => node.id);
+  if (!ids.length) return;
+  event.preventDefault();
+  event.stopPropagation();
+  setSelectedNodeIds(ids);
+  state.selectedEdgeId = null;
+  requestRender();
+}
+
+function ouvrirEditionGroupe(groupId) {
+  const id = String(groupId || "");
+  if (!id) return;
+  const ids = state.graph.nodes.filter((node) => node.groupId === id).map((node) => node.id);
+  if (!ids.length) return;
+  setSelectedNodeIds(ids);
+  state.activeGroupId = id;
+  state.selectedEdgeId = null;
+  state.groupEditorGroupId = id;
+  requestRender();
+}
+
+function openGroupEditorFromEvent(event) {
+  const btn = event.target.closest(".group-edit-btn");
+  if (!btn || !btn.dataset.groupId) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  ouvrirEditionGroupe(btn.dataset.groupId);
+}
+
+function onGroupLayerPointerDownCapture(event) {
+  const btn = event.target.closest(".group-edit-btn");
+  if (!btn || !btn.dataset.groupId) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  ouvrirEditionGroupe(btn.dataset.groupId);
+}
+
 els.edges.addEventListener("pointerdown", selectEdgeFromEvent);
 els.edges.addEventListener("click", selectEdgeFromEvent);
+if (els.groupTitleLayer) {
+  els.groupTitleLayer.addEventListener("pointerdown", onGroupLayerPointerDownCapture, true);
+  els.groupTitleLayer.addEventListener("pointerdown", onGroupPointerDown);
+  els.groupTitleLayer.addEventListener("pointerdown", selectGroupFromEvent);
+  els.groupTitleLayer.addEventListener("click", openGroupEditorFromEvent);
+  els.groupTitleLayer.addEventListener("click", selectGroupFromEvent);
+} else if (els.groupLayer) {
+  els.groupLayer.addEventListener("pointerdown", onGroupLayerPointerDownCapture, true);
+  els.groupLayer.addEventListener("pointerdown", onGroupPointerDown);
+  els.groupLayer.addEventListener("pointerdown", selectGroupFromEvent);
+  els.groupLayer.addEventListener("click", openGroupEditorFromEvent);
+  els.groupLayer.addEventListener("click", selectGroupFromEvent);
+}
 
 els.canvas.addEventListener("pointerdown", onCanvasPointerDown);
 els.canvas.addEventListener("pointermove", onCanvasPointerMove);
@@ -3888,6 +5529,10 @@ els.canvas.addEventListener("wheel", onCanvasWheel, { passive: false });
 window.addEventListener("keydown", onKeyDown);
 window.addEventListener("keyup", onKeyUp);
 window.addEventListener("beforeunload", () => {
+  try {
+    saveNow();
+  } catch {
+  }
   void leaveRealtimeChannel();
 });
 
@@ -3898,21 +5543,105 @@ els.addRootBtn.addEventListener("click", () => {
   createRootAtCenter();
 });
 
-els.addChildBtn.addEventListener("click", () => {
-  addChildToSelected();
-});
+if (els.addChildBtn) {
+  els.addChildBtn.addEventListener("click", () => {
+    addChildToSelected();
+  });
+}
 if (els.addPostitBtn) {
   els.addPostitBtn.addEventListener("click", () => {
     createPostitAtCenter();
   });
 }
 
-els.deleteBtn.addEventListener("click", deleteSelected);
+if (els.deleteBtn) {
+  els.deleteBtn.addEventListener("click", deleteSelected);
+}
+if (els.rectSelectBtn) {
+  els.rectSelectBtn.addEventListener("click", () => {
+    state.rectSelectMode = !state.rectSelectMode;
+    els.rectSelectBtn.classList.toggle("is-active", state.rectSelectMode);
+    syncRectSelectCursor();
+    if (!state.rectSelectMode) {
+      if (state.selectionRect) state.selectionRect.active = false;
+      if (els.selectionRect) els.selectionRect.hidden = true;
+    }
+    requestRender();
+  });
+}
+if (typeof groupInteractions.bindGroupQuickActions === "function") {
+  groupInteractions.bindGroupQuickActions({
+    els,
+    selectedGroupId,
+    getEditedGroupId: () => state.groupEditorGroupId || "",
+    ungroupByGroupId,
+    getGroupMeta,
+    normalizeHexColor,
+    commit,
+    requestRender,
+  });
+} else {
+  if (els.groupUngroupBtn) {
+    els.groupUngroupBtn.addEventListener("click", () => {
+      const gid = state.groupEditorGroupId || "";
+      if (!gid) return;
+      ungroupByGroupId(gid);
+    });
+  }
+  if (els.groupTitleInput) {
+    els.groupTitleInput.addEventListener("input", (event) => {
+      const groupId = state.groupEditorGroupId || "";
+      if (!groupId) return;
+      const next = String(event.target.value || "").slice(0, 80);
+      const meta = getGroupMeta(groupId);
+      if (!meta) return;
+      meta.title = next;
+      requestRender();
+    });
+    els.groupTitleInput.addEventListener("change", (event) => {
+      const groupId = state.groupEditorGroupId || "";
+      if (!groupId) return;
+      const next = String(event.target.value || "").trim().slice(0, 80) || "Groupe";
+      commit(() => {
+        const meta = getGroupMeta(groupId);
+        if (!meta) return;
+        meta.title = next;
+      }, "Titre du groupe mis à jour");
+    });
+  }
+  if (els.groupColorInput) {
+    els.groupColorInput.addEventListener("input", (event) => {
+      const groupId = state.groupEditorGroupId || "";
+      if (!groupId) return;
+      const next = normalizeHexColor(event.target.value) || "#eef3ff";
+      const meta = getGroupMeta(groupId);
+      if (!meta) return;
+      meta.color = next;
+      requestRender();
+    });
+    els.groupColorInput.addEventListener("change", (event) => {
+      const groupId = state.groupEditorGroupId || "";
+      if (!groupId) return;
+      const next = normalizeHexColor(event.target.value) || "#eef3ff";
+      commit(() => {
+        const meta = getGroupMeta(groupId);
+        if (!meta) return;
+        meta.color = next;
+      }, "Fond du groupe mis à jour");
+    });
+  }
+}
+if (els.groupCloseBtn) {
+  els.groupCloseBtn.addEventListener("click", () => {
+    state.groupEditorGroupId = "";
+    requestRender();
+  });
+}
 els.clearBtn.addEventListener("click", clearMap);
 els.deleteEdgeBtn.addEventListener("click", deleteSelectedEdge);
 
 els.titleInput.addEventListener("input", (event) => {
-  if (!state.selectedNodeId) return;
+  if (getSelectedNodeIds().length !== 1 || !state.selectedNodeId) return;
   const value = event.target.value.trim();
   commit(() => {
     const node = getNode(state.selectedNodeId);
@@ -3922,40 +5651,34 @@ els.titleInput.addEventListener("input", (event) => {
 
 if (els.nodeTitleCenterBtn) {
   els.nodeTitleCenterBtn.addEventListener("click", () => {
-    if (!state.selectedNodeId) return;
-    commit(() => {
-      const node = getNode(state.selectedNodeId);
-      if (!node) return;
+    if (!getSelectedNodeIds().length) return;
+    selectedNodesCommit("Alignement du titre mis à jour", (node) => {
       node.textAlign = getTextAlignForNode(node) === "center" ? "left" : "center";
-    }, "Alignement du titre mis à jour");
+    });
   });
 }
 
 if (els.nodeTitleBoldBtn) {
   els.nodeTitleBoldBtn.addEventListener("click", () => {
-    if (!state.selectedNodeId) return;
-    commit(() => {
-      const node = getNode(state.selectedNodeId);
-      if (!node) return;
+    if (!getSelectedNodeIds().length) return;
+    selectedNodesCommit("Gras du titre mis à jour", (node) => {
       node.textBold = !isTextBold(node);
-    }, "Gras du titre mis à jour");
+    });
   });
 }
 
 if (els.nodeTitleItalicBtn) {
   els.nodeTitleItalicBtn.addEventListener("click", () => {
-    if (!state.selectedNodeId) return;
-    commit(() => {
-      const node = getNode(state.selectedNodeId);
-      if (!node) return;
+    if (!getSelectedNodeIds().length) return;
+    selectedNodesCommit("Italique du titre mis à jour", (node) => {
       node.textItalic = !isTextItalic(node);
-    }, "Italique du titre mis à jour");
+    });
   });
 }
 
 if (els.nodeTitleLinkInput) {
   els.nodeTitleLinkInput.addEventListener("change", (event) => {
-    if (!state.selectedNodeId) return;
+    if (getSelectedNodeIds().length !== 1 || !state.selectedNodeId) return;
     const value = normalizeTitleLink(event.target.value);
     commit(() => {
       const node = getNode(state.selectedNodeId);
@@ -3966,48 +5689,43 @@ if (els.nodeTitleLinkInput) {
 }
 
 els.colorInput.addEventListener("input", (event) => {
-  if (!state.selectedNodeId) return;
+  if (!getSelectedNodeIds().length) return;
   const value = event.target.value;
-  commit(() => {
-    const node = getNode(state.selectedNodeId);
-    if (node) node.color = value;
-  }, "Couleur du nœud mise à jour");
+  selectedNodesCommit("Couleur du nœud mise à jour", (node) => {
+    node.color = value;
+  });
 });
 
 els.textColorInput.addEventListener("input", (event) => {
-  if (!state.selectedNodeId) return;
+  if (!getSelectedNodeIds().length) return;
   const value = event.target.value;
-  commit(() => {
-    const node = getNode(state.selectedNodeId);
-    if (node) node.textColor = value;
-  }, "Couleur du texte mise à jour");
+  selectedNodesCommit("Couleur du texte mise à jour", (node) => {
+    node.textColor = value;
+  });
 });
 
 els.borderColorInput.addEventListener("input", (event) => {
-  if (!state.selectedNodeId) return;
+  if (!getSelectedNodeIds().length) return;
   const value = event.target.value;
-  commit(() => {
-    const node = getNode(state.selectedNodeId);
-    if (node) node.borderColor = value;
-  }, "Couleur du contour mise à jour");
+  selectedNodesCommit("Couleur du contour mise à jour", (node) => {
+    node.borderColor = value;
+  });
 });
 
 els.borderWidthInput.addEventListener("input", (event) => {
-  if (!state.selectedNodeId) return;
+  if (!getSelectedNodeIds().length) return;
   const value = Number(event.target.value);
-  commit(() => {
-    const node = getNode(state.selectedNodeId);
-    if (node) node.borderWidth = Math.max(0, Math.min(8, Number.isFinite(value) ? value : 2));
-  }, "Épaisseur du contour mise à jour");
+  selectedNodesCommit("Épaisseur du contour mise à jour", (node) => {
+    node.borderWidth = Math.max(0, Math.min(8, Number.isFinite(value) ? value : 2));
+  });
 });
 
 els.radiusInput.addEventListener("input", (event) => {
-  if (!state.selectedNodeId) return;
+  if (!getSelectedNodeIds().length) return;
   const value = Number(event.target.value);
-  commit(() => {
-    const node = getNode(state.selectedNodeId);
-    if (node) node.radius = Math.max(0, Math.min(28, Number.isFinite(value) ? value : 14));
-  }, "Rayon du nœud mis à jour");
+  selectedNodesCommit("Rayon du nœud mis à jour", (node) => {
+    node.radius = Math.max(0, Math.min(28, Number.isFinite(value) ? value : 14));
+  });
 });
 
 els.edgeTitleInput.addEventListener("input", (event) => {
@@ -4036,6 +5754,25 @@ els.edgeStyleSelect.addEventListener("change", (event) => {
     if (edge) edge.style = nextStyle;
   }, "Style du lien mis à jour");
 });
+
+function handleEdgeTitleBgInput(rawValue) {
+  if (!state.selectedEdgeId) return;
+  const nextBg = normalizeHexColor(rawValue) || "#ffffff";
+  commit(() => {
+    const edge = getEdge(state.selectedEdgeId);
+    if (!edge) return;
+    edge.labelBgColor = nextBg;
+  }, "Fond du titre du lien mis à jour");
+}
+
+if (els.edgeTitleBgColorInput) {
+  els.edgeTitleBgColorInput.addEventListener("input", (event) => {
+    handleEdgeTitleBgInput(event.target.value);
+  });
+  els.edgeTitleBgColorInput.addEventListener("change", (event) => {
+    handleEdgeTitleBgInput(event.target.value);
+  });
+}
 
 if (els.edgeTitleCenterBtn) {
   els.edgeTitleCenterBtn.addEventListener("click", () => {
@@ -4084,15 +5821,49 @@ if (els.edgeTitleLinkInput) {
 
 function applyGlobalEdgeShape(nextShape) {
   const normalized = normalizeEdgeShape(nextShape);
-  state.defaultEdgeShape = normalized;
   state.activeTraitPreset = "personnalise";
+  const scopedGroupId = selectedGroupId();
+  if (!scopedGroupId) {
+    state.defaultEdgeShape = normalized;
+  } else {
+    const prefs = getGroupUiPrefs(scopedGroupId);
+    if (prefs) prefs.edgeShape = normalized;
+  }
   if (!state.graph.edges.length) {
+    saveNow();
     requestRender();
+    setStatus("Forme globale des liens mise à jour", false);
+    return;
+  }
+  if (scopedGroupId) {
+    const scopedIds = typeof groupActionsUtils.groupNodeIds === "function"
+      ? groupActionsUtils.groupNodeIds(state.graph.nodes, scopedGroupId)
+      : state.graph.nodes.filter((node) => node.groupId === scopedGroupId).map((node) => node.id);
+    const impacted = typeof groupActionsUtils.hasImpactedEdges === "function"
+      ? groupActionsUtils.hasImpactedEdges(state.graph.edges, scopedIds)
+      : state.graph.edges.some((edge) => scopedIds.includes(edge.source) || scopedIds.includes(edge.target));
+    if (!impacted) {
+      setStatus("Aucun lien sur ce groupe", true);
+      return;
+    }
+    commit(() => {
+      if (typeof groupActionsUtils.applyShapeToEdges === "function") {
+        groupActionsUtils.applyShapeToEdges(state.graph.edges, normalized, scopedIds);
+      } else {
+        const ids = new Set(scopedIds);
+        for (const edge of state.graph.edges) {
+          if (!ids.has(edge.source) && !ids.has(edge.target)) continue;
+          edge.shape = normalized;
+        }
+      }
+    }, "Forme des liens du groupe mise à jour");
     return;
   }
   commit(() => {
-    for (const edge of state.graph.edges) {
-      edge.shape = normalized;
+    if (typeof groupActionsUtils.applyShapeToEdges === "function") {
+      groupActionsUtils.applyShapeToEdges(state.graph.edges, normalized);
+    } else {
+      for (const edge of state.graph.edges) edge.shape = normalized;
     }
   }, "Forme globale des liens mise à jour");
 }
@@ -4134,6 +5905,16 @@ els.openExportModalBtn.addEventListener("click", openExportModal);
 els.closeExportModalBtn.addEventListener("click", closeExportModal);
 els.runExportJsonBtn.addEventListener("click", runExportJsonFromModal);
 els.runExportBtn.addEventListener("click", runExportFromModal);
+if (els.exportRegion) {
+  els.exportRegion.addEventListener("change", () => {
+    syncExportGroupPickerVisibility();
+  });
+}
+if (els.exportGroupList) {
+  els.exportGroupList.addEventListener("change", () => {
+    updateExportGroupSummary();
+  });
+}
 els.exportModal.addEventListener("click", (event) => {
   if (event.target === els.exportModal) {
     closeExportModal();
@@ -4189,7 +5970,21 @@ if (els.projectNewBtn) {
       const record = toProjectRecord({
         id,
         name,
-        graph: createDefaultGraph(),
+        graph: {
+          version: 1,
+          currentZoneId: "zone-1",
+          zones: [
+            {
+              id: "zone-1",
+              name: "Zone 1",
+              graph: createDefaultGraph(),
+              preferredLayout: state.preferredLayout || "horizontal",
+              defaultEdgeShape: normalizeEdgeShape(state.defaultEdgeShape || "geometrique"),
+              defaultEdgeStyle: normalizeEdgeStyleValue(state.defaultEdgeStyle || "dotted"),
+              defaultEdgeColor: normalizeEdgeColorValue(state.defaultEdgeColor || "#e15d44"),
+            },
+          ],
+        },
         preferredLayout: state.preferredLayout,
         defaultEdgeShape: state.defaultEdgeShape,
       });
@@ -4202,6 +5997,106 @@ if (els.projectNewBtn) {
       await joinRealtimeChannelForProject(state.currentProjectId);
     } catch {
       setStatus("Création du projet impossible", true);
+    }
+  });
+}
+
+if (els.zoneSelect) {
+  els.zoneSelect.addEventListener("change", async (event) => {
+    const nextZoneId = event.target.value;
+    if (!nextZoneId || nextZoneId === state.currentZoneId) return;
+    syncActiveZoneFromState();
+    const zone = state.zones.find((item) => item.id === nextZoneId);
+    if (!zone) {
+      refreshZoneUi();
+      return;
+    }
+    if (!applyZoneToState(zone, `Zone "${zone.name}" chargée`)) {
+      refreshZoneUi();
+      return;
+    }
+    try {
+      await persistCurrentProjectToDb();
+    } catch {
+      setStatus("Impossible de sauvegarder la zone", true);
+    }
+  });
+}
+
+if (els.zoneNewBtn) {
+  els.zoneNewBtn.addEventListener("click", async () => {
+    const proposed = window.prompt("Nom de la nouvelle zone", `Zone ${state.zones.length + 1}`);
+    if (proposed === null) return;
+    const name = proposed.trim() || `Zone ${state.zones.length + 1}`;
+    syncActiveZoneFromState();
+    const zone = zoneFromRecord(
+      {
+        id: makeZoneId(),
+        name,
+        graph: createDefaultGraph(),
+        preferredLayout: state.preferredLayout || "horizontal",
+        defaultEdgeShape: normalizeEdgeShape(state.defaultEdgeShape || "geometrique"),
+        defaultEdgeStyle: normalizeEdgeStyleValue(state.defaultEdgeStyle || "dotted"),
+        defaultEdgeColor: normalizeEdgeColorValue(state.defaultEdgeColor || "#e15d44"),
+      },
+      name,
+      state.preferredLayout || "horizontal",
+      state.defaultEdgeShape || "geometrique",
+      state.defaultEdgeStyle || "dotted",
+      state.defaultEdgeColor || "#e15d44",
+    );
+    if (!zone) return;
+    state.zones.push(zone);
+    applyZoneToState(zone, `Zone "${name}" créée`);
+    try {
+      await persistCurrentProjectToDb();
+    } catch {
+      setStatus("Création de zone impossible", true);
+    }
+  });
+}
+
+if (els.zoneRenameBtn) {
+  els.zoneRenameBtn.addEventListener("click", async () => {
+    const zone = getActiveZone();
+    if (!zone) return;
+    const proposed = window.prompt("Nouveau nom de la zone", zone.name || "");
+    if (proposed === null) return;
+    const name = proposed.trim();
+    if (!name) {
+      setStatus("Nom de zone vide", true);
+      return;
+    }
+    zone.name = name;
+    refreshZoneUi();
+    setStatus("Zone renommée", false);
+    try {
+      await persistCurrentProjectToDb();
+    } catch {
+      setStatus("Renommage de zone impossible", true);
+    }
+  });
+}
+
+if (els.zoneDeleteBtn) {
+  els.zoneDeleteBtn.addEventListener("click", async () => {
+    const zone = getActiveZone();
+    if (!zone || state.zones.length <= 1) return;
+    const ok = window.confirm(`Supprimer la zone "${zone.name}" ?`);
+    if (!ok) return;
+    const currentId = zone.id;
+    syncActiveZoneFromState();
+    state.zones = state.zones.filter((item) => item.id !== currentId);
+    const fallback = state.zones[0] || null;
+    if (fallback) {
+      applyZoneToState(fallback, "Zone supprimée");
+    } else {
+      refreshZoneUi();
+    }
+    try {
+      await persistCurrentProjectToDb();
+    } catch {
+      setStatus("Suppression de zone impossible", true);
     }
   });
 }

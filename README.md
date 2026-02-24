@@ -73,6 +73,8 @@ cd /Users/sylvain.lenoir/Desktop/Map
 node tests.js
 ```
 
+Pour la structure modulaire et les regles de maintenance, voir `ARCHITECTURE.md`.
+
 ## Raccourcis clavier
 
 - `N`: creer un noeud racine
@@ -89,5 +91,11 @@ node tests.js
 - `/Users/sylvain.lenoir/Desktop/Map/index.html`
 - `/Users/sylvain.lenoir/Desktop/Map/styles.css`
 - `/Users/sylvain.lenoir/Desktop/Map/core.js`
+- `/Users/sylvain.lenoir/Desktop/Map/persist-utils.js`
+- `/Users/sylvain.lenoir/Desktop/Map/group-utils.js`
+- `/Users/sylvain.lenoir/Desktop/Map/group-state.js`
+- `/Users/sylvain.lenoir/Desktop/Map/group-actions.js`
+- `/Users/sylvain.lenoir/Desktop/Map/group-interactions.js`
+- `/Users/sylvain.lenoir/Desktop/Map/group-render.js`
 - `/Users/sylvain.lenoir/Desktop/Map/script.js`
 - `/Users/sylvain.lenoir/Desktop/Map/tests.js`

@@ -16,8 +16,9 @@
     return typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value);
   }
 
-  function normalizeEdgeStyle(value) {
-    return value === "dashed" || value === "dotted" ? value : "solid";
+  function normalizeEdgeStyle(value, fallback = "dotted") {
+    if (value === "solid" || value === "dashed" || value === "dotted") return value;
+    return fallback;
   }
 
   function normalizeEdgeShape(value) {
@@ -99,6 +100,7 @@
 
     const rawNodes = Array.isArray(input.nodes) ? input.nodes : [];
     const rawEdges = Array.isArray(input.edges) ? input.edges : [];
+    const rawGroups = Array.isArray(input.groups) ? input.groups : [];
     const nodes = [];
     const idSet = new Set();
 
@@ -132,6 +134,7 @@
         x,
         y,
         kind,
+        groupId: typeof raw.groupId === "string" ? raw.groupId.trim().slice(0, 120) : "",
         width: normalizeNodeWidth(raw.width, kind),
         height: normalizeNodeHeight(raw.height, kind),
         title: typeof raw.title === "string" && raw.title.trim() ? raw.title.trim() : "Node",
@@ -192,7 +195,8 @@
         ? raw.color
         : (type === "free" ? "#e15d44" : "#6d86b8");
       const label = typeof raw.label === "string" ? raw.label.trim().slice(0, 80) : "";
-      const style = normalizeEdgeStyle(raw.style);
+      const labelBgColor = isHexColor(raw.labelBgColor) ? raw.labelBgColor : "#ffffff";
+      const style = normalizeEdgeStyle(raw.style, type === "tree" ? "solid" : "dotted");
       const shape = normalizeEdgeShape(raw.shape);
       edges.push({
         id,
@@ -203,6 +207,7 @@
         label,
         style,
         shape,
+        labelBgColor,
         textAlign: normalizeTextAlign(raw.textAlign, "center"),
         textBold: Boolean(raw.textBold),
         textItalic: Boolean(raw.textItalic),
@@ -225,6 +230,7 @@
           label: "",
           style: "solid",
           shape: "geometrique",
+          labelBgColor: "#ffffff",
           textAlign: "center",
           textBold: false,
           textItalic: false,
@@ -241,10 +247,24 @@
       ? input.nextId
       : (numericIds.length ? Math.max(...numericIds) : 0) + 1;
 
+    const groups = [];
+    const groupIdSet = new Set();
+    for (const raw of rawGroups) {
+      if (!raw || typeof raw !== "object") continue;
+      const id = String(raw.id || "").trim();
+      if (!id || groupIdSet.has(id)) continue;
+      groupIdSet.add(id);
+      groups.push({
+        id,
+        title: typeof raw.title === "string" && raw.title.trim() ? raw.title.trim().slice(0, 80) : "Groupe",
+        color: isHexColor(raw.color) ? raw.color : "#eef3ff",
+      });
+    }
+
     return {
       ok: errors.length === 0,
       errors,
-      data: { nodes, edges, nextId },
+      data: { nodes, edges, groups, nextId },
     };
   }
 
@@ -317,7 +337,7 @@
     }
 
     const spanMemo = new Map();
-    const SIBLING_GAP_UNITS = 0.42;
+    const SIBLING_GAP_UNITS = mode === "vertical" ? 0.58 : 0.42;
 
     function subtreeSpan(nodeId) {
       if (spanMemo.has(nodeId)) return spanMemo.get(nodeId);
@@ -337,8 +357,8 @@
     }
 
     if (mode === "horizontal" || mode === "vertical") {
-      const depthGap = mode === "horizontal" ? 300 : 132;
-      const trackGap = mode === "horizontal" ? 114 : 270;
+      const depthGap = mode === "horizontal" ? 300 : 172;
+      const trackGap = mode === "horizontal" ? 114 : 296;
       const startX = 140;
       const startY = 110;
       let cursor = 0;

@@ -29,17 +29,13 @@
             <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
             <span>Racine</span>
           </button>
-          <button id="add-child-btn" class="btn btn-primary btn-inline" title="Ajouter un enfant (Tab)" aria-label="Ajouter un enfant">
-            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6v12M8 12h9"/><path d="m14 8 3 4-3 4"/></svg>
-            <span>Enfant</span>
-          </button>
           <button id="add-postit-btn" class="btn btn-inline" title="Ajouter un post-it (P)" aria-label="Ajouter un post-it">
             <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5z"/><path d="M14 20v-5h5"/></svg>
             <span>Post-it</span>
           </button>
-          <button id="delete-btn" class="btn btn-danger btn-inline" title="Supprimer la sélection (Suppr)" aria-label="Supprimer">
-            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M8 7l1 12h6l1-12"/></svg>
-            <span>Supprimer</span>
+          <button id="rect-select-btn" class="btn btn-inline" title="Sélection rectangle" aria-label="Sélection rectangle">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h5"/></svg>
+            <span>Sélection</span>
           </button>
           <button id="clear-btn" class="btn btn-inline" title="Vider la carte" aria-label="Vider la carte">
             <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4l16 16"/><path d="M7 7h12l-2 12H9L7 7z"/></svg>
@@ -73,6 +69,21 @@
     <main class="workspace">
       <section id="canvas" class="canvas" aria-label="Zone de mind map">
         <div id="stage" class="stage">
+          <div id="selection-rect" class="selection-rect" hidden></div>
+          <div id="group-quick-actions" class="group-quick-actions" hidden>
+            <div class="group-quick-top">
+              <button id="group-ungroup-btn" class="btn btn-inline" type="button">Dissocier</button>
+              <button id="group-close-btn" class="btn btn-inline" type="button">Fermer</button>
+            </div>
+            <label>Titre groupe
+              <input id="group-title-input" type="text" placeholder="Groupe" />
+            </label>
+            <label>Fond groupe
+              <input id="group-color-input" type="color" value="#eef3ff" />
+            </label>
+          </div>
+          <div id="group-layer" class="group-layer"></div>
+          <div id="group-title-layer" class="group-title-layer"></div>
           <div id="node-quick-actions" class="node-quick-actions" hidden>
             <div class="node-quick-top">
               <button id="qa-add-child" title="Ajouter un enfant" aria-label="Ajouter un enfant">
@@ -161,6 +172,11 @@
                 </select>
               </label>
             </div>
+            <div class="edge-quick-row">
+              <label>Fond titre
+                <input id="edge-title-bg-color" type="color" value="#ffffff" />
+              </label>
+            </div>
           </div>
           <svg id="edges" class="edges"></svg>
           <div id="nodes" class="nodes"></div>
@@ -237,8 +253,16 @@
               <option value="all">Carte entière</option>
               <option value="visible">Vue visible</option>
               <option value="subtree">Sous-arbre</option>
+              <option value="groups">Groupes sélectionnés</option>
             </select>
           </label>
+          <div id="export-groups-picker" class="export-groups-picker" hidden>
+            <span>Groupes à exporter</span>
+            <details id="export-group-dropdown" class="export-group-dropdown">
+              <summary id="export-group-summary" class="export-group-summary">Choisir les groupes</summary>
+              <div id="export-group-list" class="export-group-list"></div>
+            </details>
+          </div>
           <label>Échelle
             <select id="export-scale">
               <option value="1">1x</option>
@@ -291,6 +315,12 @@
         appPassword: "9Zmrg5zowwLnQYhe",
       };
     </script>
+    <script src="persist-utils.js"></script>
+    <script src="group-utils.js"></script>
+    <script src="group-state.js"></script>
+    <script src="group-actions.js"></script>
+    <script src="group-interactions.js"></script>
+    <script src="group-render.js"></script>
     <script src="script.js"></script>
   </body>
 </html>
