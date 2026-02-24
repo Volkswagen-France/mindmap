@@ -133,7 +133,7 @@ body.app-locked #export-modal {
   display: block;
   padding: 0.38rem 0.54rem;
   border-bottom: 1px solid #c7d2e7;
-  background: #f8fbffcc;
+  background: #ffffff;
   backdrop-filter: blur(14px) saturate(130%);
   box-shadow: 0 8px 24px #2a364719;
 }
@@ -155,10 +155,6 @@ body.app-locked #export-modal {
   gap: 0.24rem;
   align-items: center;
   padding: 0.18rem;
-  border: 1px solid var(--line);
-  border-radius: var(--surface-radius);
-  background: #ffffffd6;
-  box-shadow: var(--shadow-xs);
 }
 
 .group.compact {
@@ -390,6 +386,15 @@ button:active,
 
 .btn-inline span {
   line-height: 1;
+}
+
+.topbar .btn,
+.fab-data-switch .btn,
+.fab-layout .btn,
+.fab-shape .btn,
+.node-quick-actions .btn,
+.edge-quick-actions .btn {
+  background-color: #fff;
 }
 
 .btn.is-active {
